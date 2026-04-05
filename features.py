@@ -90,6 +90,34 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
         # Target encoding for card
         state["card_te"] = _target_encode_fit(df_train[card_col].astype(str), y_train, global_mean)
 
+    # Categorical-level aggregations (merchant, category, etc.)
+    state["cat_agg"] = {}
+    if amt_col:
+        for cat in cat_cols[:6]:
+            grp = df_train.groupby(cat)[amt_col].agg(["count", "mean", "std"])
+            state["cat_agg"][cat] = {
+                "count": {str(k): float(v) for k, v in grp["count"].items()},
+                "mean": {str(k): float(v) for k, v in grp["mean"].items()},
+                "std": {str(k): float(v) for k, v in grp["std"].fillna(1).items()},
+            }
+
+    # Numeric column binning + target encoding
+    state["num_bin_te"] = {}
+    for col in num_feature_cols:
+        if col == amt_col or col == time_col:
+            continue
+        if df_train[col].nunique() < 5:
+            continue
+        try:
+            _, bins = pd.qcut(df_train[col].dropna(), q=10, retbins=True, duplicates="drop")
+            if len(bins) < 3:
+                continue
+            binned = pd.cut(df_train[col], bins=bins, labels=False, include_lowest=True)
+            te = _target_encode_fit(binned.astype(str), y_train, global_mean, 50, 20)
+            state["num_bin_te"][col] = {"bins": [float(b) for b in bins], "te": te}
+        except Exception:
+            pass
+
     # Interaction target encodings: card x each categorical
     state["interaction_te"] = {}
     state["interaction_cols"] = {}
@@ -99,6 +127,14 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
             key = df_train[card_col].astype(str) + "_" + df_train[cat].astype(str)
             state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean)
             state["interaction_cols"][name] = [card_col, cat]
+
+    # Pairwise categorical interactions (top 3 x top 3)
+    for i, a in enumerate(cat_cols[:3]):
+        for b in cat_cols[i+1:4]:
+            name = f"{a}_x_{b}"
+            key = df_train[a].astype(str) + "_" + df_train[b].astype(str)
+            state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean)
+            state["interaction_cols"][name] = [a, b]
 
     return state
 
@@ -147,6 +183,25 @@ def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
     # Card target encoding
     if card_col and card_col in df.columns and "card_te" in state:
         df["card_target_enc"] = df[card_col].astype(str).map(state["card_te"]).fillna(global_mean)
+
+    # Categorical aggregation features (merchant count/mean/std, etc.)
+    for cat, agg_maps in state.get("cat_agg", {}).items():
+        if cat in df.columns:
+            cat_str = df[cat].astype(str)
+            df[f"{cat}_count"] = cat_str.map(agg_maps.get("count", {})).fillna(0)
+            df[f"{cat}_amt_mean"] = cat_str.map(agg_maps.get("mean", {})).fillna(0)
+            cat_std_map = agg_maps.get("std", {})
+            if amt_col and amt_col in df.columns and cat_std_map:
+                cat_std = cat_str.map(cat_std_map).fillna(1).clip(lower=1)
+                df[f"{cat}_amt_zscore"] = (df[amt_col] - df[f"{cat}_amt_mean"]) / cat_std
+
+    # Numeric binned target encoding
+    for col, bin_info in state.get("num_bin_te", {}).items():
+        if col in df.columns:
+            bins = bin_info["bins"]
+            te_map = bin_info["te"]
+            binned = pd.cut(df[col], bins=bins, labels=False, include_lowest=True)
+            df[f"{col}_bin_te"] = binned.astype(str).map(te_map).fillna(global_mean)
 
     # Interaction target encodings
     interaction_cols = state.get("interaction_cols", {})
