@@ -65,6 +65,46 @@ def append_result(row: dict, tsv_path: str | Path | None = None):
         f.write(line + "\n")
 
 
+def detect_gpu() -> dict:
+    """Detect GPU availability for XGBoost and other frameworks.
+
+    Returns:
+        dict with keys: available (bool), device (str), tree_method (str), gpu_name (str)
+    """
+    result = {"available": False, "device": "cpu", "tree_method": "hist", "gpu_name": ""}
+
+    try:
+        import subprocess as _sp
+        nvidia = _sp.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                         capture_output=True, text=True, timeout=5)
+        if nvidia.returncode == 0 and nvidia.stdout.strip():
+            result["gpu_name"] = nvidia.stdout.strip().split("\n")[0]
+            # Verify XGBoost can actually use it
+            import xgboost as xgb
+            try:
+                xgb.XGBClassifier(tree_method="hist", device="cuda", n_estimators=1)
+                result["available"] = True
+                result["device"] = "cuda"
+                result["tree_method"] = "hist"
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return result
+
+
+# Module-level GPU detection (cached)
+_GPU_INFO = None
+
+def get_gpu_info() -> dict:
+    """Get cached GPU info."""
+    global _GPU_INFO
+    if _GPU_INFO is None:
+        _GPU_INFO = detect_gpu()
+    return _GPU_INFO
+
+
 def ensure_cache_dir(config: dict) -> Path:
     """Create and return the cache directory path."""
     cache_dir = ROOT_DIR / config["bigquery"].get("cache_dir", "data_cache")

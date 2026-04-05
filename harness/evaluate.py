@@ -171,6 +171,14 @@ def run_evaluation(config: dict | None = None) -> dict:
 
     total_start = time.time()
 
+    # GPU detection
+    from harness.utils import get_gpu_info
+    gpu = get_gpu_info()
+    if gpu["available"]:
+        print(f"GPU detected: {gpu['gpu_name']} (device={gpu['device']})")
+    else:
+        print("No GPU — using CPU")
+
     # Step 1: Load data
     print("Step 1: Loading data...")
     df_train, df_val, df_oot = load_data(config)

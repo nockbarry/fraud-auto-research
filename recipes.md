@@ -336,11 +336,28 @@ model = xgb.XGBClassifier(
 )
 ```
 
-### Subsampled Ensemble
+### GPU Auto-Detection
+
+GPU is auto-detected. Use `get_gpu_info()` in model.py for any custom XGBoost models:
 
 ```python
+from harness.utils import get_gpu_info
+gpu = get_gpu_info()
+# gpu = {"available": True, "device": "cuda", "tree_method": "hist", "gpu_name": "..."}
+
+model = xgb.XGBClassifier(
+    tree_method=gpu["tree_method"], device=gpu["device"], ...
+)
+```
+
+### Subsampled Ensemble (with GPU)
+
+```python
+from harness.utils import get_gpu_info
+
 def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     from sklearn.utils import resample
+    gpu = get_gpu_info()
     
     pos_idx = np.where(y_train == 1)[0]
     neg_idx = np.where(y_train == 0)[0]
@@ -351,13 +368,14 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
         neg_sample = resample(neg_idx, n_samples=n_neg, random_state=42 + ratio)
         idx = np.concatenate([pos_idx, neg_sample])
         
-        model = xgb.XGBClassifier(n_estimators=500, max_depth=6, learning_rate=0.05, ...)
+        model = xgb.XGBClassifier(
+            n_estimators=500, max_depth=6, learning_rate=0.05,
+            tree_method=gpu["tree_method"], device=gpu["device"], ...
+        )
         model.fit(X_train.iloc[idx], y_train[idx], eval_set=[(X_val, y_val)], verbose=False)
         models.append(model)
     
-    # Rank-average predictions
     val_preds = np.mean([m.predict_proba(X_val)[:, 1] for m in models], axis=0)
     oot_preds = np.mean([m.predict_proba(X_oot)[:, 1] for m in models], axis=0)
-    
     return {"y_val_pred": val_preds, "y_oot_pred": oot_preds, "model": models[0], ...}
 ```
