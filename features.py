@@ -117,6 +117,13 @@ def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
         df["amt_decimal"] = (df[amt_col] - df[amt_col].astype(int)).round(2)
         df["amt_is_round"] = (df["amt_decimal"] == 0).astype(int)
 
+    # Geo-distance features (if lat/long available for customer and merchant)
+    if all(c in df.columns for c in ["lat", "long", "merch_lat", "merch_long"]):
+        df["geo_distance"] = np.sqrt(
+            (df["lat"] - df["merch_lat"]) ** 2 + (df["long"] - df["merch_long"]) ** 2
+        )
+        df["log_geo_distance"] = np.log1p(df["geo_distance"])
+
     # Time features
     time_col = state.get("time_col")
     if time_col and time_col in df.columns:
