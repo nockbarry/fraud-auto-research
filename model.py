@@ -54,14 +54,38 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
         random_state=42,
     )
 
+    # Train primary model on full data
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
         verbose=False,
     )
 
-    y_val_pred = model.predict_proba(X_val)[:, 1]
-    y_oot_pred = model.predict_proba(X_oot)[:, 1]
+    # Subsampled ensemble: train 2 additional models on undersampled data
+    from sklearn.utils import resample
+
+    pos_idx = np.where(y_train == 1)[0]
+    neg_idx = np.where(y_train == 0)[0]
+    models = [model]
+
+    for ratio in [5, 15]:
+        n_neg = min(len(pos_idx) * ratio, len(neg_idx))
+        neg_sample = resample(neg_idx, n_samples=n_neg, replace=False, random_state=42 + ratio)
+        idx = np.concatenate([pos_idx, neg_sample])
+        np.random.RandomState(ratio).shuffle(idx)
+
+        sub_model = xgb.XGBClassifier(
+            n_estimators=500, max_depth=max_depth, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=colsample,
+            min_child_weight=3, eval_metric="aucpr",
+            early_stopping_rounds=50, random_state=42 + ratio,
+        )
+        sub_model.fit(X_train.iloc[idx], y_train[idx], eval_set=[(X_val, y_val)], verbose=False)
+        models.append(sub_model)
+
+    # Rank-average predictions
+    y_val_pred = np.mean([m.predict_proba(X_val)[:, 1] for m in models], axis=0)
+    y_oot_pred = np.mean([m.predict_proba(X_oot)[:, 1] for m in models], axis=0)
 
     return {
         "y_val_pred": y_val_pred,
@@ -69,6 +93,7 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
         "model": model,
         "train_info": {
             "n_estimators_used": model.best_iteration,
-            "scale_pos_weight": round(scale_pos_weight, 2),
+            "scale_pos_weight": round(capped_weight, 2),
+            "n_ensemble_models": len(models),
         },
     }
