@@ -50,7 +50,7 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
     for col in cat_cols:
         state["cat_freq"][col] = {str(k): float(v) for k, v in
                                   df_train[col].value_counts(normalize=True).head(1000).items()}
-        state["cat_te"][col] = _target_encode_fit(df_train[col], y_train, global_mean, 10, 5)
+        state["cat_te"][col] = _target_encode_fit(df_train[col], y_train, global_mean, 50, 20)
 
     # Detect high-null columns to drop (>95% null)
     null_rates = df_train.isna().mean()
@@ -125,7 +125,7 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
         for cat in cat_cols[:5]:
             name = f"card_x_{cat}"
             key = df_train[card_col].astype(str) + "_" + df_train[cat].astype(str)
-            state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean)
+            state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean, 50, 20)
             state["interaction_cols"][name] = [card_col, cat]
 
     # Pairwise categorical interactions (top 3 x top 3)
@@ -133,7 +133,7 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
         for b in cat_cols[i+1:4]:
             name = f"{a}_x_{b}"
             key = df_train[a].astype(str) + "_" + df_train[b].astype(str)
-            state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean)
+            state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean, 50, 20)
             state["interaction_cols"][name] = [a, b]
 
     return state
