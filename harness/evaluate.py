@@ -407,6 +407,13 @@ if __name__ == "__main__":
         save_experiment(config, results, args.hypothesis, status)
         print(f"\nstatus: {status}")
 
+        # Regenerate plots and dashboard
+        try:
+            from harness.dashboard import update_dashboard
+            update_dashboard()
+        except Exception as e:
+            print(f"  (dashboard update skipped: {e})")
+
         # Print experiment context for next iteration
         print()
         from harness.context import generate_context
