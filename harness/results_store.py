@@ -118,6 +118,8 @@ def log_experiment(
         "leakage_warnings": leakage_warnings or [],
         "config_snapshot": config_snapshot,
         "is_sota": status == "keep",
+        "top_features": {k: v for k, v in list(metrics.get("top_features", {}).items())[:10]},
+        "auprc_ci": metrics.get("auprc_ci"),
     }
 
     # Clean NaN/inf for JSON

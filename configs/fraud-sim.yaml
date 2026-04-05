@@ -48,3 +48,21 @@ validation:
 
 execution:
   timeout_seconds: 900
+
+# Dataset profile — agent reads this to adapt strategy
+dataset_profile:
+  fraud_rate: 0.005
+  n_rows: 1800000
+  n_raw_features: 16
+  has_geo: true               # lat, long, merch_lat, merch_long
+  has_identity: false
+  has_temporal: true           # unix_time, TransactionDT
+  has_email: false
+  has_demographics: true       # gender, city, state, zip, job, city_pop
+  population_shift: high       # OOT fraud rate drops 42% (0.58% -> 0.33%)
+  key_entity_col: "card_id"
+  time_col: "TransactionDT"
+  amt_col: "TransactionAmt"
+  recommended_te_smoothing:
+    min_samples: 20
+    smoothing_width: 10

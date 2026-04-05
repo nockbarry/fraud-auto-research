@@ -94,6 +94,25 @@ def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     return df[feature_cols]
 
 
+def _bootstrap_ci(y_true: np.ndarray, y_score: np.ndarray, metric_fn, n_boot: int = 200, ci: float = 0.95) -> tuple[float, float]:
+    """Compute bootstrapped confidence interval for a metric."""
+    rng = np.random.RandomState(42)
+    scores = []
+    n = len(y_true)
+    for _ in range(n_boot):
+        idx = rng.randint(0, n, size=n)
+        try:
+            s = metric_fn(y_true[idx], y_score[idx])
+            if np.isfinite(s):
+                scores.append(s)
+        except Exception:
+            pass
+    if not scores:
+        return (0.0, 0.0)
+    alpha = (1 - ci) / 2
+    return (float(np.percentile(scores, 100 * alpha)), float(np.percentile(scores, 100 * (1 - alpha))))
+
+
 def _check_leakage(X_val: pd.DataFrame, y_val: np.ndarray) -> list[str]:
     """Detect potential feature leakage via single-feature AUC on val set."""
     from sklearn.metrics import roc_auc_score
@@ -224,8 +243,21 @@ def run_evaluation(config: dict | None = None) -> dict:
     y_val_pred = model_result["y_val_pred"]
     y_oot_pred = model_result["y_oot_pred"]
 
-    # Step 5: Compute metrics
-    print("Step 5: Computing metrics...")
+    # Step 6b: Extract feature importances
+    print("Step 6b: Extracting feature importances...")
+    top_features = {}
+    try:
+        model_obj = model_result.get("model")
+        if hasattr(model_obj, "feature_importances_"):
+            importances = dict(zip(X_train.columns, model_obj.feature_importances_))
+            top_features = dict(sorted(importances.items(), key=lambda x: -x[1])[:20])
+            top_str = ", ".join(f"{k}={v:.4f}" for k, v in list(top_features.items())[:10])
+            print(f"  Top 10: {top_str}")
+    except Exception:
+        pass
+
+    # Step 7: Compute metrics
+    print("Step 7: Computing metrics...")
 
     target_recall = config["metrics"].get("target_recall", 0.80)
 
@@ -244,6 +276,10 @@ def run_evaluation(config: dict | None = None) -> dict:
     review_burden = flagged / actual_fraud if actual_fraud > 0 else 0.0
 
     comp_score, psi_rejected = composite_score(auprc_oot, prec_at_rec, psi, config)
+
+    # Step 7b: Bootstrap confidence intervals
+    auprc_ci = _bootstrap_ci(y_oot, y_oot_pred, average_precision_score)
+    prec_ci = _bootstrap_ci(y_oot, y_oot_pred, lambda yt, yp: precision_at_recall(yt, yp, target_recall)[0])
 
     total_seconds = time.time() - total_start
     n_features = X_train.shape[1]
@@ -270,6 +306,9 @@ def run_evaluation(config: dict | None = None) -> dict:
         "model_info": model_result.get("train_info", {}),
         "leakage_warnings": leakage_warnings + state_warnings,
         "transform_latency_ms": latency_ms,
+        "top_features": top_features,
+        "auprc_ci": auprc_ci,
+        "precision_ci": prec_ci,
     }
 
     return results
@@ -306,6 +345,14 @@ def print_results(results: dict):
     print(f"leakage_warnings:    {len(leakage)}")
     for w in leakage:
         print(f"  {w}")
+    ci = results.get("auprc_ci", (0, 0))
+    print(f"auprc_ci:            [{ci[0]:.4f}, {ci[1]:.4f}]")
+    pci = results.get("precision_ci", (0, 0))
+    print(f"precision_ci:        [{pci[0]:.4f}, {pci[1]:.4f}]")
+    top = results.get("top_features", {})
+    if top:
+        top_str = ", ".join(f"{k}={v:.4f}" for k, v in list(top.items())[:10])
+        print(f"top_features:        {top_str}")
 
 
 if __name__ == "__main__":

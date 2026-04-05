@@ -11,7 +11,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "config.yaml"
 DEFAULT_TSV_PATH = ROOT_DIR / "results.tsv"
 
-TSV_HEADER = "commit\tcomposite\tauprc\tprec@recall\tpsi\tstatus\thypothesis"
+TSV_HEADER = "commit\tcomposite\tauprc\tprec@recall\tpsi\tstatus\tdataset\thypothesis"
 
 
 def load_config(path: str | Path | None = None) -> dict:
@@ -60,7 +60,7 @@ def append_result(row: dict, tsv_path: str | Path | None = None):
             f.write(TSV_HEADER + "\n")
         line = "\t".join(
             str(row.get(col, ""))
-            for col in ["commit", "composite", "auprc", "prec@recall", "psi", "status", "hypothesis"]
+            for col in ["commit", "composite", "auprc", "prec@recall", "psi", "status", "dataset", "hypothesis"]
         )
         f.write(line + "\n")
 

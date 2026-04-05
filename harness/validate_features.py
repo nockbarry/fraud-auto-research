@@ -91,6 +91,30 @@ def _check_label_present(df: pd.DataFrame, name: str) -> tuple[bool, str]:
     return True, f"PASS: {name} label column OK"
 
 
+def _check_te_overfit(df_train: pd.DataFrame, y_train, df_val: pd.DataFrame, y_val, threshold: float = 0.15) -> list[str]:
+    """Detect target encoding overfit by comparing train vs val single-feature AUC."""
+    from sklearn.metrics import roc_auc_score
+
+    warnings = []
+    te_cols = [c for c in df_train.columns if c.endswith("_te") or c.endswith("_target_enc") or c.endswith("_te_")]
+    for col in te_cols:
+        try:
+            train_vals = df_train[col].fillna(0).values
+            val_vals = df_val[col].fillna(0).values
+            if len(np.unique(train_vals)) < 2 or len(np.unique(val_vals)) < 2:
+                continue
+            train_auc = roc_auc_score(y_train, train_vals)
+            val_auc = roc_auc_score(y_val, val_vals)
+            gap = abs(train_auc - 0.5) - abs(val_auc - 0.5)
+            if gap > threshold:
+                warnings.append(
+                    f"TE OVERFIT: {col} train AUC={train_auc:.3f} vs val AUC={val_auc:.3f} (gap {gap:.3f})"
+                )
+        except Exception:
+            pass
+    return warnings
+
+
 def validate(
     df_train: pd.DataFrame,
     df_val: pd.DataFrame,

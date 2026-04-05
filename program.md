@@ -79,13 +79,28 @@ grep "^composite_score:" run.log
 
 ## Feature Engineering Strategy
 
-1. **Target encoding is the most powerful technique** — but must be done in `fit()`, stored in `state`, applied in `transform()`.
-2. **Interaction target encodings** compound: card x merchant, card x category, card x email, etc.
-3. **Aggregation stats** (mean, std, count per card/customer/merchant) — compute in `fit()`.
-4. **Time features** (hour, day_of_week, is_night) — simple, no leakage risk.
-5. **Amount features** (log, decimal, z-score vs card mean) — use stats from `fit()`.
-6. **Always check IV** before adding features. IV < 0.02 = noise.
-7. **Watch PSI** — unstable features get auto-rejected.
+Read `recipes.md` for copy-paste code patterns. Read `dataset_profile` in the config for dataset characteristics.
+
+**Priority order** (by expected impact):
+
+1. **Velocity features** (Recipe 2) — per-card median gap, burst count, daily rate. Fraud has strong temporal patterns. Both datasets.
+2. **Behavioral profiling** (Recipe 3) — deviation-from-self: amount z-score vs user's own history, hour deviation. Both datasets.
+3. **OOF target encoding** (Recipe 1) — prevents within-train leakage. Use for all high-cardinality columns. Both datasets.
+4. **Identity consistency** (Recipe 4) — per-card modal email/device, entity sharing. IEEE-CIS only.
+5. **Entity resolution** (Recipe 5) — shared identity counts. Both datasets.
+6. **Anomaly score** (Recipe 6) — Mahalanobis distance from train centroid. Both datasets.
+7. **Amount patterns** (Recipe 7) — round numbers, corridor analysis. Both datasets.
+8. **Interaction TEs** — card x category, card x email, card x device. Use fitted TEs from Recipe 1.
+
+**Per-dataset strategy:**
+- **IEEE-CIS** (3.5% fraud, identity-heavy): Focus on identity consistency, OOF TE, entity sharing. Use min_samples=50.
+- **Fraud-Sim** (0.5% fraud, geo-heavy, high population shift): Focus on velocity, behavioral profiling, geo features. Use min_samples=20. Don't over-smooth.
+
+**Anti-leakage rules:**
+- All target-dependent stats MUST be computed in `fit()`, stored in `state`
+- `transform()` has NO labels — use only `state` dict
+- Check `top_features:` output after each run to verify new features contribute
+- If feature has importance < 0.001, consider removing it (adds noise)
 
 ## The Experiment Loop
 
@@ -96,8 +111,9 @@ grep "^composite_score:" run.log
 3. **Implement**: Edit `features.py` fit() and/or transform(), or `model.py`.
 4. **Commit**: `git commit -m "hypothesis description"`
 5. **Run**: `python3 -m harness.evaluate --config configs/<dataset>.yaml > run.log 2>&1`
-6. **Extract**: `grep "^composite_score:\|^auprc:\|^leakage_warnings:" run.log`
-7. **Decide**:
+6. **Extract**: `grep "^composite_score:\|^auprc:\|^auprc_ci:\|^leakage_warnings:\|^top_features:" run.log`
+7. **Analyze feedback**: Read top_features — which features have high importance? Which new features have low importance (noise)? Check auprc_ci — is the improvement within confidence interval noise? Use this to guide your next hypothesis.
+8. **Decide**:
    - If leakage_warnings > 0 → investigate, fix, and re-run.
    - If composite > SOTA + min_improvement → **KEEP**
    - Otherwise → **REVERT** (`git reset --hard HEAD~1`)
