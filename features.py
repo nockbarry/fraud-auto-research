@@ -155,6 +155,13 @@ def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
         df["amt_decimal"] = (df[amt_col] - df[amt_col].astype(int)).round(2)
         df["amt_is_round"] = (df["amt_decimal"] == 0).astype(int)
 
+    # Amount ratio to card mean
+    card_col = state.get("card_col")
+    if card_col and card_col in df.columns and amt_col and amt_col in df.columns:
+        card_mean_val = df[card_col].astype(str).map(state.get("card_mean", {})).fillna(0)
+        df["amt_ratio_card"] = df[amt_col] / card_mean_val.clip(lower=0.01)
+        df["amt_above_card_mean"] = (df[amt_col] > card_mean_val).astype(int)
+
     # Geo-distance features (if lat/long available for customer and merchant)
     if all(c in df.columns for c in ["lat", "long", "merch_lat", "merch_long"]):
         df["geo_distance"] = np.sqrt(
