@@ -1,0 +1,235 @@
+"""Full evaluation pipeline: load data, apply transforms, validate, train, compute metrics.
+
+This is the ground truth evaluation harness. The agent cannot modify this file.
+Output is grep-parseable for the autonomous loop.
+
+Usage:
+    python -m harness.evaluate
+"""
+
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import average_precision_score, precision_recall_curve
+
+from harness.data_loader import load_data
+from harness.feature_analysis import population_stability_index
+from harness.utils import ROOT_DIR, load_config
+from harness.validate_features import validate
+
+
+def precision_at_recall(y_true: np.ndarray, y_score: np.ndarray, target_recall: float) -> tuple[float, float]:
+    """Find precision at a fixed recall level.
+
+    Returns:
+        (precision, threshold) at the operating point
+    """
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_score)
+
+    # precision_recall_curve returns in decreasing recall order
+    # Find the point where recall >= target_recall with highest precision
+    valid = recalls >= target_recall
+    if not valid.any():
+        # Can't achieve target recall — return precision at max recall
+        return float(precisions[0]), float(thresholds[0]) if len(thresholds) > 0 else 0.5
+
+    # Among valid points, take the one with highest precision
+    idx = np.where(valid)[0]
+    best_idx = idx[np.argmax(precisions[idx])]
+
+    prec = float(precisions[best_idx])
+    thresh = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
+    return prec, thresh
+
+
+def score_psi(y_val_score: np.ndarray, y_oot_score: np.ndarray, n_bins: int = 10) -> float:
+    """PSI between validation and OOT score distributions."""
+    return population_stability_index(
+        pd.Series(y_val_score),
+        pd.Series(y_oot_score),
+        n_bins=n_bins,
+    )
+
+
+def composite_score(
+    auprc: float,
+    prec_at_recall: float,
+    psi: float,
+    config: dict,
+) -> tuple[float, bool]:
+    """Calculate the composite score and check PSI hard reject.
+
+    Returns:
+        (score, rejected) — rejected=True means PSI exceeded hard_reject threshold
+    """
+    metrics_cfg = config["metrics"]
+    weights = metrics_cfg["composite_weights"]
+    psi_threshold = metrics_cfg.get("psi_threshold", 0.20)
+    psi_hard_reject = metrics_cfg.get("psi_hard_reject", 0.25)
+
+    w_auprc = weights.get("auprc", 0.50)
+    w_prec = weights.get("precision_at_recall", 0.30)
+    w_psi = weights.get("psi_penalty", 0.20)
+
+    # PSI hard reject gate
+    if psi >= psi_hard_reject:
+        return 0.0, True
+
+    # PSI penalty: linear ramp from 0 at threshold to 1 at hard_reject
+    if psi < psi_threshold:
+        psi_penalty = 0.0
+    else:
+        psi_penalty = (psi - psi_threshold) / (psi_hard_reject - psi_threshold)
+
+    score = w_auprc * auprc + w_prec * prec_at_recall - w_psi * psi_penalty
+    return score, False
+
+
+def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop non-feature columns and return feature matrix."""
+    drop_cols = {"label", "txn_id", "txn_date", "customer_id"}
+    feature_cols = [c for c in df.columns if c not in drop_cols]
+    return df[feature_cols]
+
+
+def run_evaluation(config: dict | None = None) -> dict:
+    """Run the full evaluation pipeline.
+
+    Steps:
+        1. Load data from BigQuery (or cache)
+        2. Apply features.py transforms
+        3. Validate features
+        4. Train model via model.py
+        5. Compute all metrics
+    """
+    if config is None:
+        config = load_config()
+
+    total_start = time.time()
+
+    # Step 1: Load data
+    print("Step 1: Loading data...")
+    df_train, df_val, df_oot = load_data(config)
+    base_feature_count = len(df_train.columns)
+
+    # Step 2: Apply feature transforms
+    print("Step 2: Applying feature transforms...")
+    sys.path.insert(0, str(ROOT_DIR))
+    from features import transform
+
+    df_train = transform(df_train, config)
+    df_val = transform(df_val, config)
+    df_oot = transform(df_oot, config)
+
+    # Step 3: Validate
+    print("Step 3: Validating features...")
+    passed, messages = validate(df_train, df_val, df_oot, config, base_feature_count=base_feature_count)
+    for msg in messages:
+        print(f"  {msg}")
+    if not passed:
+        print("\nVALIDATION FAILED — aborting evaluation")
+        return {"error": "validation_failed", "messages": messages}
+
+    # Step 4: Prepare features and train
+    print("Step 4: Training model...")
+    train_start = time.time()
+
+    y_train = df_train["label"].values.astype(int)
+    y_val = df_val["label"].values.astype(int)
+    y_oot = df_oot["label"].values.astype(int)
+
+    X_train = _prepare_features(df_train)
+    X_val = _prepare_features(df_val)
+    X_oot = _prepare_features(df_oot)
+
+    from model import train_and_evaluate
+
+    model_result = train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config)
+    training_seconds = time.time() - train_start
+
+    y_val_pred = model_result["y_val_pred"]
+    y_oot_pred = model_result["y_oot_pred"]
+
+    # Step 5: Compute metrics
+    print("Step 5: Computing metrics...")
+
+    target_recall = config["metrics"].get("target_recall", 0.80)
+
+    auprc_val = average_precision_score(y_val, y_val_pred)
+    auprc_oot = average_precision_score(y_oot, y_oot_pred)
+    prec_at_rec, threshold = precision_at_recall(y_oot, y_oot_pred, target_recall)
+    psi = score_psi(y_val_pred, y_oot_pred)
+
+    # FPR and review burden at operating threshold
+    y_oot_binary = (y_oot_pred >= threshold).astype(int)
+    fp = ((y_oot_binary == 1) & (y_oot == 0)).sum()
+    tn = ((y_oot_binary == 0) & (y_oot == 0)).sum()
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    flagged = y_oot_binary.sum()
+    actual_fraud = y_oot.sum()
+    review_burden = flagged / actual_fraud if actual_fraud > 0 else 0.0
+
+    comp_score, psi_rejected = composite_score(auprc_oot, prec_at_rec, psi, config)
+
+    total_seconds = time.time() - total_start
+    n_features = X_train.shape[1]
+
+    results = {
+        "composite_score": comp_score,
+        "psi_rejected": psi_rejected,
+        "auprc": auprc_oot,
+        "auprc_val": auprc_val,
+        "precision_at_recall": prec_at_rec,
+        "target_recall": target_recall,
+        "operating_threshold": threshold,
+        "psi": psi,
+        "fpr": fpr,
+        "review_burden": review_burden,
+        "n_features": n_features,
+        "training_seconds": training_seconds,
+        "total_seconds": total_seconds,
+        "n_train_rows": len(y_train),
+        "n_val_rows": len(y_val),
+        "n_oot_rows": len(y_oot),
+        "positive_rate_train": y_train.mean(),
+        "positive_rate_oot": y_oot.mean(),
+        "model_info": model_result.get("train_info", {}),
+    }
+
+    return results
+
+
+def print_results(results: dict):
+    """Print results in grep-parseable format."""
+    if "error" in results:
+        print(f"\nerror: {results['error']}")
+        return
+
+    print("\n---")
+    print(f"composite_score:     {results['composite_score']:.6f}")
+    if results.get("psi_rejected"):
+        print(f"psi_rejected:        true")
+    print(f"auprc:               {results['auprc']:.6f}")
+    print(f"auprc_val:           {results['auprc_val']:.6f}")
+    print(f"precision_at_recall: {results['precision_at_recall']:.6f}")
+    print(f"target_recall:       {results['target_recall']:.2f}")
+    print(f"operating_threshold: {results['operating_threshold']:.6f}")
+    print(f"psi:                 {results['psi']:.6f}")
+    print(f"fpr:                 {results['fpr']:.6f}")
+    print(f"review_burden:       {results['review_burden']:.1f}x")
+    print(f"n_features:          {results['n_features']}")
+    print(f"training_seconds:    {results['training_seconds']:.1f}")
+    print(f"total_seconds:       {results['total_seconds']:.1f}")
+    print(f"n_train_rows:        {results['n_train_rows']}")
+    print(f"n_val_rows:          {results['n_val_rows']}")
+    print(f"n_oot_rows:          {results['n_oot_rows']}")
+    print(f"positive_rate_train: {results['positive_rate_train']:.4f}")
+    print(f"positive_rate_oot:   {results['positive_rate_oot']:.4f}")
+
+
+if __name__ == "__main__":
+    config = load_config()
+    results = run_evaluation(config)
+    print_results(results)

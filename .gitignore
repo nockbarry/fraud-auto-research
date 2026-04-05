@@ -1,0 +1,11 @@
+results.tsv
+data_cache/
+run.log
+validate.log
+analysis.log
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/

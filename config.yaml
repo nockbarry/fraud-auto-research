@@ -1,0 +1,66 @@
+# Fraud Auto-Research Configuration
+# Set these values before launching the autonomous loop.
+# The agent reads this but does not modify it.
+
+# BigQuery connection
+bigquery:
+  project: ""                        # GCP project ID
+  dataset: ""                        # BigQuery dataset
+  source_table: ""                   # Base transaction table or view
+  cache_dir: "./data_cache"          # Local parquet cache directory
+  max_rows: 5000000                  # Safety limit per split
+
+# Segment targeting — edit to focus on different populations
+segment:
+  name: "all_customers"              # Human-readable segment name
+  filter_sql: "1=1"                  # WHERE clause fragment
+  # Examples:
+  #   name: "new_customers"
+  #   filter_sql: "customer_tenure_days < 90"
+  #
+  #   name: "existing_customers"
+  #   filter_sql: "customer_tenure_days >= 90"
+  #
+  #   name: "high_value"
+  #   filter_sql: "transaction_amount > 500"
+
+# Fraud type — select label column for sub-type targeting
+fraud_type:
+  name: "all"                        # all, ato, cnp, first_party, synthetic
+  label_column: "is_fraud"           # Binary label column in source table
+  # For sub-types:
+  #   label_column: "fraud_type_ato"
+  #   label_column: "fraud_type_cnp"
+
+# Date ranges for train / validation / out-of-time splits
+# Label lag is ~60 days (chargebacks). OOT end must be >= 60 days ago.
+dates:
+  train_start: "2024-01-01"
+  train_end: "2024-09-30"
+  val_start: "2024-10-01"
+  val_end: "2024-11-30"
+  oot_start: "2024-12-01"
+  oot_end: "2025-01-31"
+
+# Metrics and composite score configuration
+metrics:
+  target_recall: 0.80                # Fixed recall for precision@ metric
+  composite_weights:
+    auprc: 0.50                      # Weight for AUPRC
+    precision_at_recall: 0.30        # Weight for precision@recall
+    psi_penalty: 0.20               # Weight for PSI stability penalty
+  psi_threshold: 0.20               # PSI below this = no penalty
+  psi_hard_reject: 0.25             # PSI above this = auto reject
+  min_improvement: 0.001            # Ignore improvements smaller than this
+
+# Feature validation thresholds
+validation:
+  max_nan_rate: 0.05                 # Max 5% NaN per feature
+  max_feature_explosion: 3.0        # Max 3x base feature count
+  max_feature_count: 200            # Absolute max features
+  max_correlation: 0.98             # Flag feature pairs above this
+
+# Execution limits
+execution:
+  timeout_seconds: 900               # 15 min max per experiment
+  bq_timeout_seconds: 300            # 5 min max for BQ query
