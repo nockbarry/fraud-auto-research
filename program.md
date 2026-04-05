@@ -122,8 +122,14 @@ Read `recipes.md` for copy-paste code patterns. Read `dataset_profile` in the co
 
 **LOOP FOREVER:**
 
-1. **Read context**: `python3 -m harness.experiment_tracker <dataset>` to see SOTA and recent history.
-2. **Propose hypothesis**: Specific, testable idea based on top_features feedback.
+1. **Read context**: After each `--save` run, a full experiment context is printed automatically. Or run `python3 -m harness.context <dataset>` to see:
+   - Current SOTA with top features and confidence intervals
+   - Last 10 experiments (kept and discarded) with AUPRC
+   - Technique success rates (which categories of changes work)
+   - Untried techniques from recipes.md
+   - Feature importance trends (growing vs declining features)
+   - Recommended next steps
+2. **Propose hypothesis**: Use the context to make an informed choice. Build on growing features, try untried techniques, avoid repeating failed categories.
 3. **Implement**: Edit `features.py` fit() and/or transform(), or `model.py`.
 4. **Run and save**:
    ```bash

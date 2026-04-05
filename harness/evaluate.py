@@ -406,3 +406,8 @@ if __name__ == "__main__":
 
         save_experiment(config, results, args.hypothesis, status)
         print(f"\nstatus: {status}")
+
+        # Print experiment context for next iteration
+        print()
+        from harness.context import generate_context
+        print(generate_context(dataset))
