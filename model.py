@@ -28,12 +28,18 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     scale_pos_weight = neg / pos if pos > 0 else 1.0
 
     model = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=6,
-        learning_rate=0.05,
+        n_estimators=1500,
+        max_depth=8,
+        learning_rate=0.03,
+        subsample=0.8,
+        colsample_bytree=0.7,
+        min_child_weight=5,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
         scale_pos_weight=scale_pos_weight,
         eval_metric="aucpr",
-        early_stopping_rounds=50,
+        early_stopping_rounds=80,
         random_state=42,
     )
 
