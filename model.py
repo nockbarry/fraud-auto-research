@@ -27,13 +27,30 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     neg = len(y_train) - pos
     scale_pos_weight = neg / pos if pos > 0 else 1.0
 
+    n_features = X_train.shape[1]
+
+    # Adaptive model params based on feature count
+    if n_features > 60:
+        max_depth, colsample, n_est, lr = 8, 0.6, 1500, 0.03
+    else:
+        max_depth, colsample, n_est, lr = 6, 0.8, 1000, 0.05
+
+    # Cap class weight to avoid over-flagging
+    capped_weight = min(scale_pos_weight, 50.0)
+
     model = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=6,
-        learning_rate=0.05,
-        scale_pos_weight=scale_pos_weight,
+        n_estimators=n_est,
+        max_depth=max_depth,
+        learning_rate=lr,
+        subsample=0.8,
+        colsample_bytree=colsample,
+        min_child_weight=5,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        scale_pos_weight=capped_weight,
         eval_metric="aucpr",
-        early_stopping_rounds=50,
+        early_stopping_rounds=80,
         random_state=42,
     )
 
