@@ -94,15 +94,58 @@ def _prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     return df[feature_cols]
 
 
+def _check_leakage(X_val: pd.DataFrame, y_val: np.ndarray) -> list[str]:
+    """Detect potential feature leakage via single-feature AUC on val set."""
+    from sklearn.metrics import roc_auc_score
+
+    warnings = []
+    for col in X_val.columns:
+        try:
+            vals = X_val[col].fillna(0).values
+            if len(np.unique(vals)) < 2:
+                continue
+            auc = roc_auc_score(y_val, vals)
+            if auc > 0.90:
+                warnings.append(f"LEAKAGE WARNING: {col} has AUC={auc:.4f} — suspiciously predictive")
+            elif auc < 0.10:
+                warnings.append(f"LEAKAGE WARNING: {col} has AUC={1-auc:.4f} (inverted) — suspiciously predictive")
+        except Exception:
+            pass
+    return warnings
+
+
+def _check_state_serializable(state: dict) -> list[str]:
+    """Verify the fitted state is JSON-serializable."""
+    import json
+
+    warnings = []
+    try:
+        json.dumps(state)
+    except (TypeError, ValueError) as e:
+        warnings.append(f"STATE WARNING: fit() state is not JSON-serializable: {e}")
+    return warnings
+
+
+def _measure_transform_latency(transform_fn, df_single_row, state, config) -> float:
+    """Time a single-row transform for scoring latency estimation."""
+    import time as _time
+
+    start = _time.perf_counter()
+    transform_fn(df_single_row, state, config)
+    return (_time.perf_counter() - start) * 1000  # ms
+
+
 def run_evaluation(config: dict | None = None) -> dict:
-    """Run the full evaluation pipeline.
+    """Run the full evaluation pipeline with leakage-safe fit/transform separation.
 
     Steps:
-        1. Load data from BigQuery (or cache)
-        2. Apply features.py transforms
-        3. Validate features
-        4. Train model via model.py
-        5. Compute all metrics
+        1. Load data
+        2. Separate labels (harness controls label access)
+        3. Fit feature state on train only
+        4. Transform all splits without labels
+        5. Validate features + leakage detection
+        6. Train model
+        7. Compute all metrics
     """
     if config is None:
         config = load_config()
@@ -114,17 +157,39 @@ def run_evaluation(config: dict | None = None) -> dict:
     df_train, df_val, df_oot = load_data(config)
     base_feature_count = len(df_train.columns)
 
-    # Step 2: Apply feature transforms
-    print("Step 2: Applying feature transforms...")
+    # Step 2: Separate labels — harness controls access
+    print("Step 2: Separating labels (harness-controlled)...")
+    y_train = df_train.pop("label").values.astype(int)
+    y_val = df_val.pop("label").values.astype(int)
+    y_oot = df_oot.pop("label").values.astype(int)
+
+    # Step 3: Fit on train only (with labels)
+    print("Step 3: Fitting feature state on train...")
     sys.path.insert(0, str(ROOT_DIR))
-    from features import transform
+    import importlib
+    import features as features_mod
+    importlib.reload(features_mod)
 
-    df_train = transform(df_train, config)
-    df_val = transform(df_val, config)
-    df_oot = transform(df_oot, config)
+    fit_state = features_mod.fit(df_train.copy(), pd.Series(y_train), config)
 
-    # Step 3: Validate
-    print("Step 3: Validating features...")
+    # Verify state serializability
+    state_warnings = _check_state_serializable(fit_state)
+    for w in state_warnings:
+        print(f"  {w}")
+
+    # Step 4: Transform all splits WITHOUT labels
+    print("Step 4: Transforming features (no labels)...")
+    df_train = features_mod.transform(df_train, fit_state, config)
+    df_val = features_mod.transform(df_val, fit_state, config)
+    df_oot = features_mod.transform(df_oot, fit_state, config)
+
+    # Re-attach labels for validation (harness use only)
+    df_train["label"] = y_train
+    df_val["label"] = y_val
+    df_oot["label"] = y_oot
+
+    # Step 5: Validate
+    print("Step 5: Validating features...")
     passed, messages = validate(df_train, df_val, df_oot, config, base_feature_count=base_feature_count)
     for msg in messages:
         print(f"  {msg}")
@@ -132,13 +197,20 @@ def run_evaluation(config: dict | None = None) -> dict:
         print("\nVALIDATION FAILED — aborting evaluation")
         return {"error": "validation_failed", "messages": messages}
 
-    # Step 4: Prepare features and train
-    print("Step 4: Training model...")
-    train_start = time.time()
+    # Step 5b: Leakage detection
+    X_val_check = _prepare_features(df_val)
+    leakage_warnings = _check_leakage(X_val_check, y_val)
+    for w in leakage_warnings:
+        print(f"  {w}")
 
-    y_train = df_train["label"].values.astype(int)
-    y_val = df_val["label"].values.astype(int)
-    y_oot = df_oot["label"].values.astype(int)
+    # Step 5c: Scoring latency
+    single_row = df_train.drop(columns=["label"]).head(1)
+    latency_ms = _measure_transform_latency(features_mod.transform, single_row, fit_state, config)
+    print(f"  Single-row transform latency: {latency_ms:.1f}ms")
+
+    # Step 6: Prepare features and train
+    print("Step 6: Training model...")
+    train_start = time.time()
 
     X_train = _prepare_features(df_train)
     X_val = _prepare_features(df_val)
@@ -196,6 +268,8 @@ def run_evaluation(config: dict | None = None) -> dict:
         "positive_rate_train": y_train.mean(),
         "positive_rate_oot": y_oot.mean(),
         "model_info": model_result.get("train_info", {}),
+        "leakage_warnings": leakage_warnings + state_warnings,
+        "transform_latency_ms": latency_ms,
     }
 
     return results
@@ -227,9 +301,20 @@ def print_results(results: dict):
     print(f"n_oot_rows:          {results['n_oot_rows']}")
     print(f"positive_rate_train: {results['positive_rate_train']:.4f}")
     print(f"positive_rate_oot:   {results['positive_rate_oot']:.4f}")
+    print(f"transform_latency:   {results.get('transform_latency_ms', 0):.1f}ms")
+    leakage = results.get("leakage_warnings", [])
+    print(f"leakage_warnings:    {len(leakage)}")
+    for w in leakage:
+        print(f"  {w}")
 
 
 if __name__ == "__main__":
-    config = load_config()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
     results = run_evaluation(config)
     print_results(results)

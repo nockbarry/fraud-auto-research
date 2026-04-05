@@ -1,0 +1,50 @@
+# Simulated Fraud Detection — rich raw transaction features
+dataset_name: "fraud-sim"
+dataset_description: "Simulated credit card transactions, 1.8M txns, 1000 customers, 800 merchants, rich raw features"
+
+local_data:
+  enabled: true
+  data_dir: "./data/fraud-sim"
+  prefix: "raw"
+
+bigquery:
+  project: ""
+  dataset: ""
+  source_table: ""
+  cache_dir: "./data_cache"
+  max_rows: 5000000
+
+segment:
+  name: "all_transactions"
+  filter_sql: "1=1"
+
+fraud_type:
+  name: "all"
+  label_column: "label"
+
+dates:
+  train_start: "2024-01-01"
+  train_end: "2024-09-30"
+  val_start: "2024-10-01"
+  val_end: "2024-11-30"
+  oot_start: "2024-12-01"
+  oot_end: "2025-01-31"
+
+metrics:
+  target_recall: 0.80
+  composite_weights:
+    auprc: 0.50
+    precision_at_recall: 0.30
+    psi_penalty: 0.20
+  psi_threshold: 0.20
+  psi_hard_reject: 0.25
+  min_improvement: 0.001
+
+validation:
+  max_nan_rate: 0.10
+  max_feature_explosion: 5.0
+  max_feature_count: 300
+  max_correlation: 0.98
+
+execution:
+  timeout_seconds: 900
