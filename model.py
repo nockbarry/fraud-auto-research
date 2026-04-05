@@ -68,7 +68,7 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     neg_idx = np.where(y_train == 0)[0]
     models = [model]
 
-    for ratio in [3, 10, 30]:
+    for ratio in [1, 3, 10, 30, 50]:
         n_neg = min(len(pos_idx) * ratio, len(neg_idx))
         neg_sample = resample(neg_idx, n_samples=n_neg, replace=False, random_state=42 + ratio)
         idx = np.concatenate([pos_idx, neg_sample])
