@@ -108,7 +108,12 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
                         zorder=10,
                     )
                     ann_idx += 1
-                    prev_best = max(val, prev_best) if higher_better else min(val, prev_best) if prev_best else val
+                    if prev_best is None:
+                        prev_best = val
+                    elif higher_better:
+                        prev_best = max(val, prev_best)
+                    else:
+                        prev_best = min(val, prev_best)
 
         if col == "psi":
             ax.axhline(y=0.20, color="#fbbf24", linestyle="--", alpha=0.7, label="penalty threshold")
