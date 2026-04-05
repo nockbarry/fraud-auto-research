@@ -52,16 +52,32 @@ If you need target encoding, frequency encoding, or aggregation stats: compute t
 ## Running Experiments
 
 ```bash
-# Run against a specific dataset config:
+# Run and auto-save to experiment tracker:
+python3 -m harness.evaluate --config configs/ieee-cis.yaml --save --hypothesis "add velocity features"
+
+# Or run without saving (manual review):
 python3 -m harness.evaluate --config configs/ieee-cis.yaml > run.log 2>&1
-python3 -m harness.evaluate --config configs/fraud-sim.yaml > run.log 2>&1
+grep "^composite_score:\|^auprc:\|^top_features:" run.log
+
+# View experiment status:
+python3 -m harness.experiment_tracker
+python3 -m harness.experiment_tracker ieee-cis
 
 # Feature analysis (fast, ~30s):
 python3 -m harness.feature_analysis
-
-# Extract key metric:
-grep "^composite_score:" run.log
 ```
+
+## Experiment Tracking
+
+Experiments are saved to `experiments/{dataset}/` directories. Each experiment preserves:
+- **features.py** and **model.py** code snapshots
+- **metrics.json** — all metrics, feature importances, CIs
+- **state.json** — fitted feature state (the deployable artifact)
+- **metadata.json** — hypothesis, status, timestamp, parent experiment
+
+The `sota` symlink always points to the current best. Use `--save` flag to auto-save and auto-determine keep/discard based on composite score vs SOTA.
+
+**No git operations needed during the loop.** Just edit features.py/model.py, run with `--save`, and the tracker handles everything. You can review discarded experiments later — nothing is lost.
 
 ## Available Datasets
 
@@ -106,19 +122,17 @@ Read `recipes.md` for copy-paste code patterns. Read `dataset_profile` in the co
 
 **LOOP FOREVER:**
 
-1. **Read context**: Check results (results.tsv or results/ dir). Identify SOTA.
-2. **Propose hypothesis**: Specific, testable idea.
+1. **Read context**: `python3 -m harness.experiment_tracker <dataset>` to see SOTA and recent history.
+2. **Propose hypothesis**: Specific, testable idea based on top_features feedback.
 3. **Implement**: Edit `features.py` fit() and/or transform(), or `model.py`.
-4. **Commit**: `git commit -m "hypothesis description"`
-5. **Run**: `python3 -m harness.evaluate --config configs/<dataset>.yaml > run.log 2>&1`
-6. **Extract**: `grep "^composite_score:\|^auprc:\|^auprc_ci:\|^leakage_warnings:\|^top_features:" run.log`
-7. **Analyze feedback**: Read top_features — which features have high importance? Which new features have low importance (noise)? Check auprc_ci — is the improvement within confidence interval noise? Use this to guide your next hypothesis.
-8. **Decide**:
-   - If leakage_warnings > 0 → investigate, fix, and re-run.
-   - If composite > SOTA + min_improvement → **KEEP**
-   - Otherwise → **REVERT** (`git reset --hard HEAD~1`)
-8. **Log**: Record in results.tsv
-9. **Plot**: `python3 -m harness.plot_results`
+4. **Run and save**:
+   ```bash
+   python3 -m harness.evaluate --config configs/<dataset>.yaml --save --hypothesis "your hypothesis"
+   ```
+   The tracker auto-determines keep/discard, saves code snapshots, and updates SOTA.
+5. **Read feedback**: The output shows status, top_features, auprc_ci. Use this to guide the next experiment.
+6. **If discarded**: The code is preserved in `experiments/<dataset>/exp_NNN/`. You can review it later. Just edit features.py again and try something new.
+7. **If kept**: The `sota` symlink is updated. Build on this success.
 10. **NEVER STOP**
 
 ## Anti-Patterns

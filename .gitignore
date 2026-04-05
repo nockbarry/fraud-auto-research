@@ -1,4 +1,5 @@
 results.tsv
+experiments/
 data/
 data_cache/
 run.log

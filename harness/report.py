@@ -57,9 +57,47 @@ def _dataset_summary(df: pd.DataFrame, name: str) -> dict:
     }
 
 
+def _load_from_tracker() -> pd.DataFrame | None:
+    """Try to load experiment data from the directory-based tracker."""
+    try:
+        from harness.experiment_tracker import list_datasets, load_history
+        datasets = list_datasets()
+        if not datasets:
+            return None
+        rows = []
+        for ds in datasets:
+            for exp in load_history(ds):
+                ms = exp.get("metrics_summary", {})
+                rows.append({
+                    "commit": exp.get("id", ""),
+                    "composite": ms.get("composite_score", 0),
+                    "auprc": ms.get("auprc", 0),
+                    "prec@recall": ms.get("precision_at_recall", 0),
+                    "psi": ms.get("psi", 0),
+                    "status": exp.get("status", ""),
+                    "dataset": exp.get("dataset", ""),
+                    "hypothesis": exp.get("hypothesis", ""),
+                })
+        return pd.DataFrame(rows) if rows else None
+    except Exception:
+        return None
+
+
 def generate_report(tsv_path: Path | None = None) -> str:
     """Generate the HTML report and return the output path."""
-    df = load_results(tsv_path)
+    # Try tracker first, fall back to TSV
+    tracker_df = _load_from_tracker()
+    tsv_df = load_results(tsv_path) if (tsv_path or (ROOT_DIR / "results.tsv").exists()) else None
+
+    if tracker_df is not None and tsv_df is not None:
+        df = pd.concat([tsv_df, tracker_df], ignore_index=True).drop_duplicates(subset=["commit", "dataset", "hypothesis"])
+    elif tracker_df is not None:
+        df = tracker_df
+    elif tsv_df is not None:
+        df = tsv_df
+    else:
+        print("No experiment data found.")
+        return ""
     report_dir = ROOT_DIR / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
 

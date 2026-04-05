@@ -355,13 +355,54 @@ def print_results(results: dict):
         print(f"top_features:        {top_str}")
 
 
+def save_experiment(config: dict, results: dict, hypothesis: str, status: str, state: dict | None = None):
+    """Save experiment using the directory-per-experiment tracker."""
+    from harness.experiment_tracker import save_experiment as _save
+
+    dataset = config.get("dataset_name", "unknown")
+    return _save(
+        dataset=dataset,
+        hypothesis=hypothesis,
+        status=status,
+        metrics=results,
+        state=state,
+        config_snapshot={
+            "target_recall": config.get("metrics", {}).get("target_recall"),
+            "dataset_name": dataset,
+        },
+    )
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
+    parser.add_argument("--hypothesis", type=str, default=None, help="What this experiment tried")
+    parser.add_argument("--save", action="store_true", help="Auto-save experiment to tracker")
     args = parser.parse_args()
 
     config = load_config(args.config)
     results = run_evaluation(config)
     print_results(results)
+
+    if args.save and args.hypothesis:
+        # Auto-determine status by comparing to SOTA
+        from harness.experiment_tracker import get_sota
+        dataset = config.get("dataset_name", "unknown")
+        sota = get_sota(dataset)
+        min_imp = config.get("metrics", {}).get("min_improvement", 0.001)
+
+        if "error" in results:
+            status = "crash"
+        elif results.get("psi_rejected"):
+            status = "reject_psi"
+        elif sota is None:
+            status = "keep"  # first experiment
+        else:
+            sota_composite = sota.get("metrics_summary", {}).get("composite_score", 0) or 0
+            new_composite = results.get("composite_score", 0)
+            status = "keep" if new_composite > sota_composite + min_imp else "discard"
+
+        save_experiment(config, results, args.hypothesis, status)
+        print(f"\nstatus: {status}")
