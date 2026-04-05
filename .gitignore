@@ -1,4 +1,5 @@
 results.tsv
+data/
 data_cache/
 run.log
 validate.log

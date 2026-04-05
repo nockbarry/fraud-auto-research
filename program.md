@@ -24,14 +24,15 @@ To set up a new experiment run:
 ## Scope
 
 **What you CAN modify:**
-- `features.sql` — BigQuery feature extraction. Add CTEs, window functions, aggregations, joins. Keep placeholders intact.
-- `features.py` — Python transforms. Add encoding, scaling, interactions, derived features. The `transform()` function must preserve row count and output numeric features.
+- `features.py` — Python transforms. This is your primary workspace. Add encoding, scaling, interactions, aggregations, derived features. The `transform(df, config)` function must preserve row count and output all-numeric features.
 - `model.py` — Model training. Change hyperparameters, try different algorithms, add calibration, ensemble. The `train_and_evaluate()` function signature must not change.
+- `features.sql` — BigQuery feature extraction (only used in BigQuery mode, not for IEEE-CIS evaluation).
 
 **What you CANNOT modify:**
 - Anything in `harness/` — this is the fixed evaluation infrastructure.
 - `config.yaml` — the human sets this before launching you.
 - `pyproject.toml` — do not add dependencies.
+- Files in `data/` — the source parquet files are fixed.
 
 ## Goal
 
@@ -50,49 +51,81 @@ Where:
   - 0.20 <= PSI < 0.25: linear penalty ramp
   - PSI >= 0.25: **automatic rejection** regardless of other metrics
 
-## Domain Context: Fraud Feature Engineering
+## Dataset: IEEE-CIS Fraud Detection
 
-You are building features for transaction fraud detection. The target is chargeback-based fraud labels with 30-60 day lag. Consider these feature categories:
+This is the Vesta Corporation card-not-present fraud dataset from Kaggle. The original dataset has 431 features including 377 Vesta-derived features (V, C, D, M columns). Those derived features have been **stripped** — your job is to engineer new features from the 55 raw attributes and close the performance gap.
 
-**Velocity features** (best done in SQL):
-- Transaction count/sum in rolling windows: 1h, 6h, 24h, 7d, 30d
-- Per customer, per device, per IP, per merchant, per BIN
-- Velocity ratios (e.g., 1h count / 30d average)
+**Benchmarks** (from `prepare_data.py`):
+- Full-feature XGBoost (all 431 columns): **AUPRC = 0.4982** — this is the ceiling
+- Raw-feature baseline (55 columns, freq encoding): **AUPRC = 0.1899** — this is where you start
+- **Gap to close: 0.3083 AUPRC**
 
-**Behavioral deviation** (SQL or Python):
-- Current amount vs customer's historical mean/std (z-score)
-- Time-of-day deviation from customer's normal pattern
-- Merchant category deviation from customer's typical categories
-- Transaction frequency acceleration/deceleration
+**Available raw columns** (55 features after stripping V/C/D/M):
+- `TransactionDT` — seconds from a reference time point (use for time-based features)
+- `TransactionAmt` — transaction dollar amount
+- `ProductCD` — product code (W, H, C, S, R)
+- `card1-card6` — card attributes (card1=number hash, card4=visa/mastercard, card6=debit/credit)
+- `addr1, addr2` — address info (addr1=billing region, addr2=country code)
+- `dist1` — distance measure
+- `P_emaildomain, R_emaildomain` — purchaser and recipient email domains
+- `id_01 to id_38` — identity verification features (many high-null)
+- `DeviceType` — desktop/mobile
+- `DeviceInfo` — device model/browser
 
-**Device and session features** (SQL):
-- Device fingerprint age (first seen vs current)
-- IP address velocity (how many customers from same IP in window)
-- Browser/user-agent anomaly flags
-- Geolocation distance from customer's typical locations
+**Data setup**: Pre-split into `data/raw_{train,val,oot}.parquet` (70/15/15 time-based split). The harness loads these directly — no BigQuery needed for this evaluation dataset.
 
-**Address and identity features** (SQL):
-- Billing/shipping address mismatch
-- Address change recency (days since last address change)
-- Phone/email change recency
+**Key insights from feature analysis** (`python -m harness.feature_analysis`):
+- 37 of 46 features are predictive (IV > 0.02)
+- Strong predictors: ProductCD, identity flags (id_15-id_38), card3, addr2, DeviceType
+- High correlation pairs to watch: id_03↔id_04 (1.0), id_09↔id_10 (1.0), id_05↔id_06 (1.0)
+- Unstable features (PSI > 0.25): TransactionID, TransactionDT, P_emaildomain, card6, id_13
 
-**Customer lifecycle** (SQL):
-- Days since first transaction
-- Transaction frequency over account lifetime
-- Dormancy periods (days since last transaction)
-- Product/service tenure
+## Domain Context: Feature Engineering Ideas
 
-**Vendor enrichment signals** (SQL):
-- Third-party risk scores (if available in source data)
-- Email age, phone verification status
-- Identity match confidence scores
+Since the V/C/D/M columns were derived from these raw attributes, you can try to reconstruct similar features:
+
+**Transaction amount features** (features.py):
+- Log transform of TransactionAmt (highly skewed)
+- Amount bins / quantile buckets
+- Amount relative to card1 average (z-score within card groups)
+- Amount decimal pattern (cents = 0 vs non-zero, known fraud signal)
+
+**Time-based features** (features.py using TransactionDT):
+- Hour of day (TransactionDT mod 86400 / 3600)
+- Day of week
+- Time since previous transaction per card1 (requires sort + groupby)
+- Transaction velocity: count per card1 in last N seconds
+- Time-of-day deviation from card1's typical pattern
+
+**Card-level aggregations** (features.py):
+- Transaction count per card1
+- Mean/std amount per card1
+- Unique addr1 count per card1
+- Unique ProductCD count per card1
+- card1 + addr1 combination frequency
+
+**Email domain features** (features.py):
+- Email domain risk score (frequency encoding is baseline — try target encoding)
+- P_email == R_email match flag
+- Free email provider flag (gmail, yahoo, hotmail vs corporate)
+- Email domain + card combination frequency
+
+**Identity signal aggregation** (features.py):
+- Count of non-null identity fields (more verification = lower risk)
+- Identity field consistency flags
+- Device type + identity match patterns
+
+**Interaction features** (features.py):
+- card1 x ProductCD
+- card1 x addr1
+- TransactionAmt x ProductCD
+- DeviceType x card6 (mobile debit vs desktop credit)
 
 **Python-side transforms** (features.py):
-- Frequency encoding for categorical features
-- Target encoding with smoothing (be careful of leakage — fit on train only)
+- Frequency encoding for high-cardinality categoricals (baseline already does this)
+- Target encoding with smoothing (be careful — fit on train only)
 - Log transforms for skewed distributions
-- Ratio features (amount / avg_amount, count / avg_count)
-- Interaction features between key predictors
+- Ratio features (amount / card_avg_amount)
 - Binning continuous features into risk buckets
 
 ## Feature Engineering Strategy

@@ -2,7 +2,14 @@
 # Set these values before launching the autonomous loop.
 # The agent reads this but does not modify it.
 
-# BigQuery connection
+# --- Data source ---
+# Option 1: Local parquet files (for IEEE-CIS evaluation or offline work)
+local_data:
+  enabled: true                       # Set false to use BigQuery instead
+  data_dir: "./data"                  # Directory containing parquet files
+  prefix: "raw"                       # File prefix: raw_train.parquet, raw_val.parquet, raw_oot.parquet
+
+# Option 2: BigQuery connection (for production use)
 bigquery:
   project: ""                        # GCP project ID
   dataset: ""                        # BigQuery dataset
@@ -12,28 +19,15 @@ bigquery:
 
 # Segment targeting — edit to focus on different populations
 segment:
-  name: "all_customers"              # Human-readable segment name
-  filter_sql: "1=1"                  # WHERE clause fragment
-  # Examples:
-  #   name: "new_customers"
-  #   filter_sql: "customer_tenure_days < 90"
-  #
-  #   name: "existing_customers"
-  #   filter_sql: "customer_tenure_days >= 90"
-  #
-  #   name: "high_value"
-  #   filter_sql: "transaction_amount > 500"
+  name: "all_transactions"           # Human-readable segment name
+  filter_sql: "1=1"                  # WHERE clause fragment (BigQuery mode only)
 
 # Fraud type — select label column for sub-type targeting
 fraud_type:
   name: "all"                        # all, ato, cnp, first_party, synthetic
-  label_column: "is_fraud"           # Binary label column in source table
-  # For sub-types:
-  #   label_column: "fraud_type_ato"
-  #   label_column: "fraud_type_cnp"
+  label_column: "label"              # Binary label column (already 'label' in prepared data)
 
-# Date ranges for train / validation / out-of-time splits
-# Label lag is ~60 days (chargebacks). OOT end must be >= 60 days ago.
+# Date ranges (BigQuery mode only — local mode uses pre-split files)
 dates:
   train_start: "2024-01-01"
   train_end: "2024-09-30"
@@ -55,12 +49,17 @@ metrics:
 
 # Feature validation thresholds
 validation:
-  max_nan_rate: 0.05                 # Max 5% NaN per feature
-  max_feature_explosion: 3.0        # Max 3x base feature count
-  max_feature_count: 200            # Absolute max features
-  max_correlation: 0.98             # Flag feature pairs above this
+  max_nan_rate: 0.50                 # Max 50% NaN per feature (IEEE-CIS has high nulls)
+  max_feature_explosion: 5.0         # Max 5x base feature count
+  max_feature_count: 300             # Absolute max features
+  max_correlation: 0.98              # Flag feature pairs above this
 
 # Execution limits
 execution:
   timeout_seconds: 900               # 15 min max per experiment
   bq_timeout_seconds: 300            # 5 min max for BQ query
+
+# Benchmarks (for reference — do not modify)
+# Full-feature XGBoost (all 431 columns):  AUPRC = 0.4982
+# Raw-feature XGBoost (55 columns):        AUPRC = 0.2588
+# Gap to close through feature engineering: 0.2394
