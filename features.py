@@ -92,11 +92,13 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
 
     # Interaction target encodings: card x each categorical
     state["interaction_te"] = {}
+    state["interaction_cols"] = {}
     if card_col:
-        for cat in cat_cols[:5]:  # top 5 categoricals by cardinality
+        for cat in cat_cols[:5]:
+            name = f"card_x_{cat}"
             key = df_train[card_col].astype(str) + "_" + df_train[cat].astype(str)
-            name = f"{card_col}_{cat}"
             state["interaction_te"][name] = _target_encode_fit(key, y_train, global_mean)
+            state["interaction_cols"][name] = [card_col, cat]
 
     return state
 
@@ -147,16 +149,12 @@ def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
         df["card_target_enc"] = df[card_col].astype(str).map(state["card_te"]).fillna(global_mean)
 
     # Interaction target encodings
+    interaction_cols = state.get("interaction_cols", {})
     for name, te_map in state.get("interaction_te", {}).items():
-        parts = name.split("_", 1)
-        if len(parts) == 2:
-            col_a_name, col_b_name = parts[0], parts[1]
-            # Reconstruct from card_col and cat name
-            col_a = state.get("card_col", col_a_name)
-            col_b = col_b_name
-            if col_a in df.columns and col_b in df.columns:
-                key = df[col_a].astype(str) + "_" + df[col_b].astype(str)
-                df[f"{name}_target_enc"] = key.map(te_map).fillna(global_mean)
+        cols = interaction_cols.get(name)
+        if cols and len(cols) == 2 and cols[0] in df.columns and cols[1] in df.columns:
+            key = df[cols[0]].astype(str) + "_" + df[cols[1]].astype(str)
+            df[f"{name}_te"] = key.map(te_map).fillna(global_mean)
 
     # Encode categorical columns
     cat_cols = [c for c in state.get("cat_cols", []) if c in df.columns]
