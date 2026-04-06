@@ -280,8 +280,11 @@ def run_evaluation(config: dict | None = None) -> dict:
 
     target_recall = config["metrics"].get("target_recall", 0.80)
 
+    from sklearn.metrics import roc_auc_score
     auprc_val = average_precision_score(y_val, y_val_pred)
     auprc_oot = average_precision_score(y_oot, y_oot_pred)
+    auroc_val = roc_auc_score(y_val, y_val_pred)
+    auroc_oot = roc_auc_score(y_oot, y_oot_pred)
     # Val metrics drive keep/discard — OOT is held-out reporting only
     prec_at_rec_val, threshold_val = precision_at_recall(y_val, y_val_pred, target_recall)
     prec_at_rec_oot, threshold_oot = precision_at_recall(y_oot, y_oot_pred, target_recall)
@@ -314,10 +317,12 @@ def run_evaluation(config: dict | None = None) -> dict:
         "composite_score": comp_score,
         "psi_rejected": psi_rejected,
         "auprc_val": auprc_val,
+        "auroc_val": auroc_val,
         "precision_at_recall_val": prec_at_rec_val,
         "auprc_val_ci": auprc_val_ci,
         # Reporting metrics (OOT — held-out, never used for selection)
         "auprc": auprc_oot,
+        "auroc": auroc_oot,
         "precision_at_recall": prec_at_rec_oot,
         "composite_score_oot": comp_score_oot,
         "target_recall": target_recall,
@@ -356,7 +361,9 @@ def print_results(results: dict):
     if results.get("psi_rejected"):
         print(f"psi_rejected:            true")
     print(f"auprc_val:               {results['auprc_val']:.6f}  (SELECTION)")
+    print(f"auroc_val:               {results['auroc_val']:.6f}  (SELECTION)")
     print(f"auprc:                   {results['auprc']:.6f}  (OOT / held-out)")
+    print(f"auroc:                   {results['auroc']:.6f}  (OOT / held-out)")
     print(f"precision_at_recall_val: {results.get('precision_at_recall_val', 0):.6f}  (SELECTION)")
     print(f"precision_at_recall:     {results['precision_at_recall']:.6f}  (OOT)")
     print(f"target_recall:           {results['target_recall']:.2f}")

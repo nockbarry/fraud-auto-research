@@ -185,30 +185,55 @@ This is the agent's memory. It prevents repeating failed approaches and surfaces
 
 ---
 
-## Example: Clean Baseline Run
+## Example Runs
 
-Starting from a clean baseline (target encoding + frequency encoding + basic amount/time features):
+Plots show five panels: composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, and PSI. Green circles/line = val (drives keep/discard). Amber diamonds = OOT held-out. Red ✕ = discarded.
 
-### IEEE-CIS
+### IEEE-CIS — Most Recent Run
+
+![IEEE-CIS current plot](docs/plot_ieee-cis_current.png)
+
+24 experiments, 6 kept. AUPRC OOT: **0.178 → 0.192 (+7.7%)**. Published ceiling with full derived features: ~0.50.
+
+| # | Status | AUPRC val | AUPRC OOT | Hypothesis |
+|---|--------|-----------|-----------|------------|
+| 0 | crash | — | — | First attempt — string columns not encoded |
+| 1 | **keep** | 0.227 | **0.178** | Clean baseline: TE + freq encoding + amount/time |
+| 3 | **keep** | 0.228 | 0.178 | Amount patterns: round numbers, cents, corridors |
+| 6 | **keep** | 0.232 | 0.185 | Velocity + behavioral profiling (card1 inter-transaction gaps) |
+| 15 | **keep** | 0.241 | 0.193 | Focal loss ensemble: standard XGB + focal loss averaged |
+| 18 | **keep** | **0.249** | **0.192** | addr2 card-sharing count (fraud ring signal) |
+
+Top features: `addr2_log_n_cards` (0.36), `addr2_n_cards` (0.34), `amt_is_round` (0.05). The addr2 region sharing count — how many distinct cards transact from the same billing region — emerged as the dominant signal, consistent with fraud ring detection patterns.
+
+---
+
+### Fraud-Sim — Most Recent Run
+
+![Fraud-Sim current plot](docs/plot_fraud-sim_current.png)
+
+21 experiments, 5 kept. AUPRC OOT: **0.499 → 0.690 (+38.4%)**. Strong improvement driven by behavioral amount deviation features.
+
+| # | Status | AUPRC val | AUPRC OOT | Hypothesis |
+|---|--------|-----------|-----------|------------|
+| 0 | **keep** | 0.512 | **0.499** | Clean baseline: TE + freq encoding + behavioral deviations |
+| 4 | **keep** | 0.561 | 0.556 | Geo: haversine home→merchant distance |
+| 6 | **keep** | 0.588 | 0.582 | Cyclical time features (hour sin/cos) + OOF target encoding |
+| 9 | **keep** | 0.629 | 0.624 | Extended behavioral: per-merchant/category amount corridors (Q25/Q75) |
+| 13 | **keep** | **0.676** | **0.690** | Model tuning: scale_pos_weight=2.0 (undertrained baseline fixed) |
+
+Top features: `merchant_amt_zscore` (0.20), `category_amt_zscore` (0.19), `category_target_enc` (0.15), `hour_cos` (0.05). Behavioral deviation features (z-scores vs. merchant/category baseline) dominate — this is the characteristic signal of the Sparkov simulation.
+
+> **Note on val vs OOT:** All keep/discard decisions are based on val composite score. The OOT AUPRC is held-out and never used for selection — it is purely a generalization check. For fraud-sim the OOT AUPRC slightly exceeds val AUPRC (0.690 vs 0.676) because the OOT split has a lower fraud rate (0.33% vs 0.58%), making the harder-to-detect frauds proportionally rarer and the model's precision slightly higher.
+
+---
+
+### Baseline Only
+
+For reference, the original clean baselines before any agent iteration:
 
 ![IEEE-CIS baseline plot](docs/plot_ieee-cis_baseline.png)
-
-| # | Status | AUPRC | Hypothesis |
-|---|--------|-------|------------|
-| 0 | crash | — | first attempt (string columns not encoded — fixed) |
-| 1 | **keep** | **0.178** | clean baseline: TE + freq encoding + amount/time |
-
-Baseline AUPRC 0.178. Published ceiling with full derived features: ~0.50.
-
-### Fraud-Sim
-
 ![Fraud-Sim baseline plot](docs/plot_fraud-sim_baseline.png)
-
-| # | Status | AUPRC | Hypothesis |
-|---|--------|-------|------------|
-| 0 | **keep** | **0.499** | clean baseline: TE + freq encoding + behavioral amount deviations |
-
-Baseline AUPRC 0.499. Strong starting point — behavioral amount deviation features (merchant/category/gender z-scores) carry significant signal even in the baseline.
 
 ---
 

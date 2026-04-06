@@ -147,10 +147,12 @@ def save_experiment(
             # Val-based (drive keep/discard)
             "composite_score": clean_metrics.get("composite_score"),
             "auprc_val": clean_metrics.get("auprc_val"),
+            "auroc_val": clean_metrics.get("auroc_val"),
             "precision_at_recall_val": clean_metrics.get("precision_at_recall_val"),
             "auprc_val_ci": clean_metrics.get("auprc_val_ci"),
             # OOT-based (held-out reporting)
             "auprc": clean_metrics.get("auprc"),
+            "auroc": clean_metrics.get("auroc"),
             "composite_score_oot": clean_metrics.get("composite_score_oot"),
             "precision_at_recall": clean_metrics.get("precision_at_recall"),
             "psi": clean_metrics.get("psi"),
