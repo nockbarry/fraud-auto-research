@@ -280,10 +280,10 @@ def generate_dashboard_html(data: dict) -> str:
         .ds-body {{ display: flex; gap: 20px; align-items: flex-start; }}
         .ds-plot {{ flex: 0 0 55%; min-width: 0; }}
         .ds-plot img {{ width: 100%; border-radius: 8px; background: white; display: block; }}
-        .ds-table {{ flex: 1 1 0; min-width: 0; overflow-x: auto; }}
+        .ds-table {{ flex: 1 1 0; min-width: 0; overflow: hidden; }}
 
-        /* Experiment table */
-        .table-wrap {{ overflow-x: auto; }}
+        /* Experiment table — scrollable, capped to plot height */
+        .table-wrap {{ overflow-x: auto; overflow-y: auto; max-height: 700px; border: 1px solid #1e2a3a; border-radius: 8px; }}
         .exp-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
         .exp-table thead tr {{ background: #0f172a; position: sticky; top: 0; z-index: 1; }}
         .exp-table th {{ padding: 8px 6px; text-align: center; color: #94a3b8; font-weight: 600; font-size: 11px; border-bottom: 1px solid #334155; white-space: nowrap; }}
