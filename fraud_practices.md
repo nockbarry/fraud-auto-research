@@ -785,3 +785,493 @@ When generating features for a new fraud dataset, work through these categories 
 - **High-Cardinality Categorical Attributes in Fraud:** MDPI Mathematics (2022). https://www.mdpi.com/2227-7390/10/20/3808
 - **NVIDIA IEEE-CIS Top Solution Summary:** https://developer.nvidia.com/blog/leveraging-machine-learning-to-detect-fraud-tips-to-developing-a-winning-kaggle-solution/
 - **PaySim Paper:** Lopez-Rojas et al. (2016). EMSS. https://www.msc-les.org/proceedings/emss/2016/EMSS2016_249.pdf
+
+---
+
+## Part 5: Email, Device, and Identity Features (Deep Reference)
+
+*These patterns come from production CNP/ATO pipelines and are underrepresented in academic literature. Most datasets won't have all of these signals, but any subset is worth engineering when available.*
+
+---
+
+### 5.1 Email Feature Engineering (30+ Patterns)
+
+Email is one of the richest single features in online fraud. A legitimate user registers once with a consistent email; fraudsters rotate aliases, use disposable providers, and generate addresses programmatically.
+
+**Local-part structural features:**
+```python
+local = email.split('@')[0]
+domain = email.split('@')[1] if '@' in email else ''
+
+# Entropy of local part (high entropy = random/generated)
+from collections import Counter
+import math
+def entropy(s):
+    p = [c/len(s) for c in Counter(s).values()]
+    return -sum(x * math.log2(x) for x in p if x > 0)
+local_entropy = entropy(local)           # >3.5 = suspicious for a name
+
+# Character composition
+local_digit_ratio = sum(c.isdigit() for c in local) / max(len(local), 1)
+local_special_ratio = sum(not c.isalnum() for c in local) / max(len(local), 1)
+local_upper_ratio = sum(c.isupper() for c in local) / max(len(local), 1)
+local_length = len(local)
+
+# Pattern indicators
+has_plus_tag = '+' in local          # real users: jsmith+amazon; fraudsters: bulk test aliases
+local_starts_with_digit = local[0].isdigit() if local else False
+local_all_digits = local.isdigit()   # e.g., 1234567@domain.com
+local_hex_like = all(c in '0123456789abcdefABCDEF' for c in local) and len(local) >= 8
+local_uuid_like = bool(re.match(r'^[0-9a-f]{8}-?[0-9a-f]{4}', local))  # generated UUIDs
+local_sequential = bool(re.search(r'(abc|123|xyz)', local.lower()))
+```
+
+**Name ↔ email coherence (strong ATO signal):**
+```python
+import Levenshtein  # pip install python-Levenshtein
+
+# Edit distance between sender name and email local part
+# Legitimate users often have jsmith, john.smith, smithj etc.
+def name_email_coherence(full_name, email_local):
+    name_parts = full_name.lower().replace('-', ' ').split()
+    min_dist = min(
+        Levenshtein.distance(email_local.lower(), part)
+        for part in name_parts
+    ) if name_parts else 999
+    return min_dist / max(len(email_local), 1)  # normalized: <0.3 = coherent
+
+name_email_distance = name_email_coherence(sender_name, local)
+name_in_email = any(part in local.lower() for part in sender_name.lower().split())
+```
+
+**Domain classification:**
+```python
+# Free consumer email providers
+FREEMAIL_DOMAINS = {'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+                    'icloud.com', 'aol.com', 'protonmail.com', 'mail.com'}
+
+# Disposable/temporary email providers (maintain list, ~1000+ domains)
+DISPOSABLE_DOMAINS = {'mailinator.com', 'guerrillamail.com', 'tempmail.com',
+                      'throwaway.email', 'yopmail.com', '10minutemail.com'}
+
+# High-risk TLDs disproportionately used for fraud accounts
+RISKY_TLDS = {'.tk', '.ml', '.ga', '.cf', '.gq',  # free ccTLDs
+              '.xyz', '.click', '.link', '.download', '.loan', '.work'}
+
+email_is_freemail = domain in FREEMAIL_DOMAINS
+email_is_disposable = domain in DISPOSABLE_DOMAINS or any(domain.endswith(t) for t in RISKY_TLDS)
+email_is_custom_domain = not email_is_freemail and not email_is_disposable
+
+# Domain-level signals
+domain_has_digits = bool(re.search(r'\d', domain.split('.')[0]))
+domain_depth = domain.count('.')  # subdomain depth; abc.mail.com = 2
+domain_age_flag = 0  # can integrate with WHOIS if available
+```
+
+**Suspicious keyword detection:**
+```python
+SUSPICIOUS_KEYWORDS = ['temp', 'burner', 'trash', 'spam', 'fake', 'anon',
+                       'test', 'noreply', 'dummy', 'void', 'null', 'drop']
+local_has_suspicious = any(kw in local.lower() for kw in SUSPICIOUS_KEYWORDS)
+```
+
+---
+
+### 5.2 Device Signal Features
+
+**Battery + charging state (emulator detection):**
+```python
+# Real mobile devices: highly variable battery levels, may or may not be charging
+# Emulators: typically report 100% battery and charging=True
+battery_level = device.get('battery_level', -1)     # 0-100 or -1 if missing
+battery_charging = device.get('battery_charging', None)
+
+battery_is_missing = (battery_level == -1)
+battery_is_round = (battery_level % 10 == 0)         # 0, 10, 20...100 - suspicious
+battery_is_full_charging = (battery_level == 100 and battery_charging == True)
+battery_emulator_score = (battery_is_full_charging or battery_is_missing).astype(int)
+
+# Composite device risk
+device_risk_score = (
+    0.3 * battery_emulator_score +
+    0.3 * debugger_attached +
+    0.2 * headless_browser +
+    0.2 * (client_server_time_diff_abs > 300)  # >5 min clock skew
+)
+```
+
+**Client-server time differential (clock skew):**
+```python
+# Bots and emulators often have misconfigured clocks
+client_server_time_diff = client_timestamp - server_timestamp  # seconds, signed
+client_server_time_diff_abs = abs(client_server_time_diff)
+
+# Bucketed for model interpretability
+time_diff_bucket = pd.cut(client_server_time_diff_abs,
+    bins=[-1, 30, 120, 300, 900, float('inf')],
+    labels=['<30s', '30-120s', '2-5min', '5-15min', '>15min'])
+```
+
+**Session behavioral signals:**
+```python
+# Form completion time: too fast = auto-fill/bot; too slow = looking up stolen data
+form_fill_seconds = submit_timestamp - page_load_timestamp
+is_suspiciously_fast = (form_fill_seconds < 3)     # <3s = likely programmatic
+is_suspiciously_slow = (form_fill_seconds > 600)   # >10min = unusual
+
+# Copy-paste detection (if available from browser events)
+fields_pasted = count of form fields where paste event was detected
+paste_ratio = fields_pasted / total_form_fields     # >0.5 = suspicious for name/address
+
+# Session depth: did user navigate or go straight to high-risk action?
+pages_before_transaction = session_page_count - 1   # 0 = direct deep-link = suspicious
+session_duration_seconds = session_end - session_start
+actions_per_minute = total_session_actions / max(session_duration_seconds / 60, 1)
+```
+
+---
+
+### 5.3 Identity Stability and Entity Resolution (4-Layer Framework)
+
+This is the most powerful and underused technique in production fraud systems. A legitimate user has a coherent, slowly-drifting identity footprint. Fraudsters either show sudden discontinuities (ATO) or never establish a stable footprint (synthetic identity). Mules look individually clean but are connected to fraudsters via shared identity elements.
+
+**Layer 1: Identity Element Tracking**
+
+For each user, maintain the historical set of identity elements they've presented. Features measure stability of that set.
+
+```python
+# Per-user history of identity elements (maintained in feature store)
+# Updated after each transaction; only past transactions used for current scoring
+
+KNOWN_DEVICES = set of device_ids seen for this user_id historically
+KNOWN_IPS = set of ip_addresses
+KNOWN_IP_SUBNETS = set of /24 subnets
+KNOWN_EMAILS = set of emails
+KNOWN_BANK_ACCOUNTS = set of destination bank_accts
+
+# Current transaction element novelty flags
+identity_device_is_new = device_id not in KNOWN_DEVICES
+identity_ip_is_new = ip_address not in KNOWN_IPS
+identity_subnet_is_new = ip_subnet not in KNOWN_IP_SUBNETS
+identity_email_is_new = email not in KNOWN_EMAILS
+identity_bank_acct_is_new = bank_acct not in KNOWN_BANK_ACCOUNTS
+
+# Known ratio: what fraction of current session's identity elements have been seen before?
+elements_presented = [device_id, ip_address, email, ...]
+known_count = sum(element in historical_set for element, historical_set in zip(elements_presented, sets))
+identity_known_ratio = known_count / len(elements_presented)  # <0.5 = high ATO risk
+
+# Jaccard similarity to modal identity (most common configuration for this user)
+modal_identity_vector = {modal_device, modal_ip_subnet, modal_email}
+current_vector = {device_id, ip_subnet, email}
+identity_jaccard = len(modal_identity_vector & current_vector) / len(modal_identity_vector | current_vector)
+```
+
+**Layer 2: Behavioral Profile Deviation**
+
+Count-based windows (last N transactions) rather than time-based — adapts to each user's transaction cadence automatically. A weekly user needs 6 months to build 30-transaction profile; a daily user needs 30 days.
+
+```python
+# Compute against last 30 transactions (not last 30 days)
+CUSTOMER_AMT_HISTORY_30TXN = sorted list of amounts from last 30 transactions
+
+# Amount percentile rank in user's own history
+amt_pctile_vs_self = percentile_rank(txn_amt, CUSTOMER_AMT_HISTORY_30TXN)
+is_max_amount_ever = (txn_amt > max(CUSTOMER_AMT_HISTORY_ALL))
+
+# Hour-of-day deviation from user's norm
+CUSTOMER_MEDIAN_TXN_HOUR = median(hour for each past transaction)
+hour_deviation_from_norm = abs(current_hour - CUSTOMER_MEDIAN_TXN_HOUR)
+is_unusual_hour_for_user = (hour_deviation_from_norm > 4)
+
+# Transaction frequency burst
+CUSTOMER_MEDIAN_TXN_INTERVAL_DAYS = median(days between consecutive transactions)
+days_since_last = (current_ts - CUSTOMER_LAST_TXN_TS).days
+burst_ratio = CUSTOMER_MEDIAN_TXN_INTERVAL_DAYS / max(days_since_last, 0.01)
+# burst_ratio >> 1 = unusually frequent; = 1 = normal cadence
+
+# First-seen flags (high predictive power, especially × high amount)
+is_first_transaction_to_recipient = recipient not in CUSTOMER_KNOWN_RECIPIENTS
+is_first_transaction_to_country = destination_country not in CUSTOMER_KNOWN_COUNTRIES
+is_first_time_device = identity_device_is_new
+new_recipient_x_high_amount = is_first_transaction_to_recipient * amt_pctile_vs_self
+
+# Minimum history guard: suppress behavioral features until N prior transactions
+behav_features_valid = (CUSTOMER_TXN_COUNT >= 5)
+```
+
+**Layer 3: Entity Resolution (Shared Identity Clustering)**
+
+Link user accounts by shared identity elements. Individual accounts may look clean; the cluster reveals coordinated fraud.
+
+```python
+# Shared-entity counts (compute as aggregation features)
+# "How many distinct user_ids have been seen on this device in the last 30 days?"
+device_distinct_users_30d = df[df.device_id == current_device].user_id.nunique()
+ip_subnet_distinct_users_7d = df[df.ip_subnet == current_subnet].user_id.nunique()
+dest_bank_distinct_senders_7d = df[df.bank_acct == current_bank_acct].user_id.nunique()
+
+# Flag highly shared entities
+device_is_shared = (device_distinct_users_30d > 3)    # >3 users on 1 device = mule network
+ip_is_high_density = (ip_subnet_distinct_users_7d > 20)
+dest_is_mule_candidate = (dest_bank_distinct_senders_7d > 10)
+
+# Cluster-level risk: what fraction of this user's "neighbors" have been flagged?
+# Requires Union-Find or graph component computation over shared elements
+cluster_size = count of users in same connected component (shared device/IP/email)
+cluster_fraud_rate = (fraud cases in cluster) / cluster_size
+cluster_max_risk_score = max(risk scores of all users in cluster)
+```
+
+**Layer 4: Cross-Layer Interaction Features**
+
+```python
+# Identity instability × behavioral deviation = ATO signature
+stability_x_deviation = (1 - identity_known_ratio) * amt_pctile_vs_self
+
+# Triple novelty: everything unprecedented at once
+triple_novelty_score = (is_max_amount_ever + is_first_transaction_to_recipient +
+                        identity_device_is_new) / 3.0
+
+# New account + high value + shared device = synthetic identity + mule
+new_account_x_high_amount = (account_age_days < 30) * txn_amt
+new_account_x_shared_device = (account_age_days < 30) * device_is_shared
+```
+
+**Design principles:**
+- **Causal ordering**: always compute features using only transactions strictly *before* the current one. Update the state *after* feature computation.
+- **Count-based windows** adapt to user cadence; time-based windows under-profile low-frequency users.
+- **Minimum history guard**: suppress behavioral features until ≥5 prior transactions.
+- **Production**: maintain per-user state in a feature store (Redis/DynamoDB/Feast), do point lookups at scoring time.
+
+---
+
+### 5.4 Recipient-Side and Cross-Entity Aggregations
+
+**Most fraud systems over-index on sender-side aggregations.** The receiver is often the most predictive aggregation key because mule accounts receive from many clean-looking senders. A receiving bank account that has received transfers from 15 different senders in one week is almost certainly a mule account, even if each individual sender looks fine.
+
+**Recipient-side aggregations:**
+```python
+# Aggregate BY the destination, not the sender
+dest_account_distinct_senders_7d = count of unique senders to this bank_acct in 7 days
+dest_account_total_received_24h = sum of amounts received by this bank_acct in 24h
+dest_account_avg_txn_amount = mean amount received historically
+dest_account_first_seen_days = days since dest bank_acct was first seen in our system
+
+# Flag patterns
+dest_is_new_in_system = (dest_account_first_seen_days < 7)
+dest_has_many_senders = (dest_account_distinct_senders_7d > 5)
+dest_received_spike = (dest_account_total_received_24h > 10 * dest_account_avg_daily_received)
+```
+
+**Cross-entity aggregations (diversity metrics):**
+```python
+# Diversity of identities on shared infrastructure = credential stuffing / enumeration
+ip_distinct_email_domains_1h = count of unique email domains transacting from this IP in 1h
+ip_distinct_usernames_1h = count of unique users from this IP in 1h
+device_distinct_accounts_24h = count of unique accounts using this device in 24h
+
+# High diversity on single entity = scanning/stuffing attack
+ip_is_scanning = (ip_distinct_email_domains_1h > 10)
+device_shared_across_accounts = (device_distinct_accounts_24h > 3)
+```
+
+**Failure-rate aggregations:**
+```python
+# Failed transaction attempts by entity in time window
+# (declined, authentication failures, OTP failures, 3DS failures)
+card_failure_rate_24h = card_failed_attempts_24h / max(card_total_attempts_24h, 1)
+ip_failure_rate_1h = ip_failed_attempts_1h / max(ip_total_attempts_1h, 1)
+user_otp_failures_last_login = count of OTP failures in session before successful auth
+
+# High failure rate = credential testing, card testing
+card_is_testing = (card_failure_rate_24h > 0.5 and card_total_attempts_24h > 3)
+```
+
+**Corridor aggregations:**
+```python
+# Aggregate by (sender_country, destination_country) pair
+# Fraud concentrates in specific corridors
+corridor = (sender_country, destination_country)
+corridor_avg_fraud_rate_30d = historical fraud rate for this corridor
+corridor_avg_txn_amount = mean amount for this corridor
+corridor_txn_count_24h = volume on this corridor in last 24h
+
+# Current transaction vs corridor norms
+txn_amount_vs_corridor_avg = txn_amt / max(corridor_avg_txn_amount, 1.0)
+```
+
+**Systematic aggregation dimensions (9 keys × 4 windows):**
+
+The most comprehensive aggregation coverage comes from computing count, sum_amount, mean_amount, std_amount, distinct_recipients across these dimensions × time windows:
+
+| Grouping Key | Signal |
+|---|---|
+| `user_id` / `card_id` | Individual behavioral baseline |
+| `ip_address` | Point source attacks |
+| `ip_subnet_24` (/24) | Subnet-level campaigns |
+| `ip_subnet_16` (/16) | ASN/datacenter-level campaigns |
+| `email_domain` | Domain-level coordinated fraud |
+| `bank_institution` | Institutional risk concentration |
+| `destination_country` | Corridor risk |
+| `device_id` | Device sharing / mule networks |
+| `sender_name` | Name reuse across accounts |
+
+| Time Window | Primary Signal |
+|---|---|
+| 5 min | Card testing, credential stuffing |
+| 1 hour | ATO spend-up, burst attack |
+| 24 hours | Daily fraud campaigns |
+| 7 days | Weekly patterns, bust-out ramp-up |
+
+---
+
+## Part 6: Modeling Methodology for Extreme Imbalance
+
+*Relevant when fraud rate is ≤2%. At 0.05% fraud rate (1 in 2,000 transactions), standard evaluation metrics break down entirely.*
+
+---
+
+### 6.1 Evaluation Hierarchy
+
+**Never use accuracy or ROC AUC as primary metrics at extreme imbalance.**
+
+At 0.05% fraud, a model that flags everything as legitimate achieves 99.95% accuracy and ~0.5 ROC AUC (random). ROC AUC inflates because the FPR denominator (true negatives) is enormous — even a large number of false positives barely moves the FPR.
+
+```
+Primary metric:   AUPRC (Precision-Recall AUC)
+Operating metric: Recall @ target_FPR (e.g., "fraud capture rate at 1% false positive rate")
+Secondary:        Lift curve, calibration curve (Brier score), expected financial cost
+```
+
+**Bootstrapped confidence intervals are mandatory on small OOT sets:**
+```python
+# At 0.05% fraud with 100K OOT transactions, you have ~50 fraud cases.
+# Point estimates are meaningless — always report CIs.
+from sklearn.utils import resample
+from sklearn.metrics import average_precision_score
+
+def bootstrap_auprc(y_true, y_score, n_boot=1000):
+    scores = []
+    n = len(y_true)
+    for _ in range(n_boot):
+        idx = np.random.randint(0, n, size=n)
+        if y_true[idx].sum() < 2: continue
+        scores.append(average_precision_score(y_true[idx], y_score[idx]))
+    lo, hi = np.percentile(scores, [2.5, 97.5])
+    return np.mean(scores), lo, hi  # (mean, lower_ci, upper_ci)
+
+# Report: AUPRC = 0.423 [95% CI: 0.387, 0.459]
+# If two models' CIs overlap, there is no statistical evidence of difference.
+```
+
+---
+
+### 6.2 Imbalance Treatment Comparison
+
+| Treatment | Tradeoff | When to Use |
+|---|---|---|
+| **Threshold-only** (no resampling) | Cleanest theoretically; may underfit minority class with very weak features | Strong features + enough positives (>5K in train) |
+| **Class weights** (scale_pos_weight) | Correct: modifies loss function. Set ratio 10–50:1, not 1/fraud_rate (too aggressive) | Default starting point |
+| **Random undersampling** | Loses majority class information. Target 5:1–20:1 ratio, not 1:1. Never resample eval data | When training set is large enough to afford it |
+| **SMOTE** | Interpolates between rare fraud cases — may create nonsensical samples in high-dimensional feature space. Use SMOTE-ENN or SMOTE-Tomek, target 10:1–5:1 not 1:1 | Use cautiously; verify on OOT |
+| **Focal loss** | Theoretically cleanest: down-weights easy negatives, focuses gradient on hard boundary cases | Best when class weight alone underperforms |
+| **Anomaly hybrid** | Train isolation forest on all data → add anomaly score as feature → supervised classifier | When labeled fraud is <500 cases |
+
+**Focal loss with XGBoost:**
+```python
+import numpy as np
+
+def focal_loss_gradient(gamma=2.0):
+    """XGBoost custom objective for focal loss."""
+    def focal_obj(y_pred, dtrain):
+        y_true = dtrain.get_label()
+        y_pred = 1 / (1 + np.exp(-y_pred))  # sigmoid
+        
+        # Focal weight
+        pt = np.where(y_true == 1, y_pred, 1 - y_pred)
+        focal_weight = (1 - pt) ** gamma
+        
+        # Gradient and hessian
+        grad = focal_weight * (y_pred - y_true) + gamma * focal_weight * np.log(pt + 1e-8) * (y_pred * (1 - y_pred))
+        hess = focal_weight * y_pred * (1 - y_pred)
+        return grad, hess
+    return focal_obj
+
+# Usage:
+model = xgb.train(
+    params={'eval_metric': 'aucpr'},
+    dtrain=dtrain,
+    obj=focal_loss_gradient(gamma=2.0),
+    ...
+)
+```
+
+---
+
+### 6.3 Recommended Ensemble Strategy
+
+Train 3 models with diverse imbalance treatments, rank-average their scores:
+
+```python
+# Model 1: Focal loss + moderate class weight
+model_1 = xgb.XGBClassifier(scale_pos_weight=20, ...)  # or focal loss custom obj
+
+# Model 2: Random undersampling (10:1 neg:pos ratio)
+neg_idx = np.where(y_train == 0)[0]
+pos_idx = np.where(y_train == 1)[0]
+neg_sample = np.random.choice(neg_idx, size=10 * len(pos_idx), replace=False)
+idx_under = np.concatenate([pos_idx, neg_sample])
+model_2 = xgb.XGBClassifier(scale_pos_weight=1, ...)
+model_2.fit(X_train[idx_under], y_train[idx_under], ...)
+
+# Model 3: Anomaly score as additional feature
+from sklearn.ensemble import IsolationForest
+iso = IsolationForest(contamination=fraud_rate, random_state=42)
+iso.fit(X_train)
+X_train_aug = X_train.copy()
+X_train_aug['anomaly_score'] = -iso.score_samples(X_train)  # higher = more anomalous
+model_3 = xgb.XGBClassifier(scale_pos_weight=20, ...)
+model_3.fit(X_train_aug, y_train, ...)
+
+# Rank-average ensemble (more robust than probability averaging at extreme imbalance)
+from scipy.stats import rankdata
+def rank_avg(*score_arrays):
+    n = len(score_arrays[0])
+    ranks = [rankdata(s) / n for s in score_arrays]
+    return np.mean(ranks, axis=0)
+
+y_oot_pred = rank_avg(
+    model_1.predict_proba(X_oot)[:, 1],
+    model_2.predict_proba(X_oot)[:, 1],
+    model_3.predict_proba(X_oot_aug)[:, 1],
+)
+```
+
+**Why rank-average over probability average:** At extreme imbalance, raw probability estimates are poorly calibrated across models. Rank-averaging preserves the ordinal signal while neutralizing calibration differences.
+
+---
+
+### 6.4 Practical XGBoost Settings for Fraud
+
+```python
+xgb.XGBClassifier(
+    tree_method="hist",         # 5–10x faster than "exact" on large datasets
+    device="cuda",              # GPU acceleration (auto-detect with get_gpu_info())
+    max_bin=256,                # histogram resolution — sweet spot for tabular data
+    n_estimators=1000,          # with early stopping, many trees are harmless
+    early_stopping_rounds=50,   # stop when val AUPRC doesn't improve
+    eval_metric="aucpr",        # AUPRC-optimized early stopping (vs logloss)
+    max_depth=6,                # 4–7 typical for fraud; deeper = more overfit
+    learning_rate=0.05,         # lower lr + more trees > higher lr + fewer trees
+    subsample=0.8,              # row sampling per tree — regularization + diversity
+    colsample_bytree=0.7,       # column sampling — critical with 100+ correlated aggregations
+    min_child_weight=5,         # minimum samples in leaf — prevents overfitting on rare fraud
+    scale_pos_weight=20,        # tune as hyperparameter; 10–50 range; not 1/fraud_rate
+    nthread=-1,                 # use all available CPU cores
+    random_state=42,
+)
+```
+
+**Feature selection note:** At 100–400 features, recursive feature elimination or importance-based pruning should happen *inside* the cross-validation loop — not as a pre-processing step on the full dataset. Feature selection on the same data you train on inflates importance of noise features.
+
