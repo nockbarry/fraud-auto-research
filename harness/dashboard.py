@@ -40,6 +40,7 @@ def _history_to_df(history: list[dict]) -> pd.DataFrame:
             "auroc_val": ms.get("auroc_val", 0) or 0,
             "auroc": ms.get("auroc", 0) or 0,
             "prec@recall": ms.get("precision_at_recall", 0) or 0,
+            "prec@recall_val": ms.get("precision_at_recall_val", 0) or 0,
             "psi": ms.get("psi", 0) or 0,
             "n_features": ms.get("n_features", 0) or 0,
             "status": exp.get("status", "discard"),

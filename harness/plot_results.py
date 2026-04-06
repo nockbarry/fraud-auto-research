@@ -166,21 +166,35 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
         prec_ax_idx = 2
         psi_ax_idx = 3
 
-    # ── Panel: Precision @ Recall ─────────────────────────────────────────────
+    # ── Panel: Precision @ Recall (same 3-series layout as AUPRC) ────────────
     ax = axes[prec_ax_idx]
-    col = "prec@recall"
-    if col in df.columns:
-        vals = pd.to_numeric(df[col], errors="coerce")
-        ax.scatter(df.index, vals, color="#e5e7eb", s=25, zorder=2)
+    has_prec_val = "prec@recall_val" in df.columns and df["prec@recall_val"].notna().any()
+
+    if has_prec_val:
+        # OOT: one amber diamond per experiment
+        ax.scatter(df.index, pd.to_numeric(df["prec@recall"], errors="coerce"),
+                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
         if len(discards):
-            ax.scatter(discards.index, pd.to_numeric(discards[col], errors="coerce"),
-                       color="#fca5a5", s=35, marker="x", linewidths=1.5, zorder=3, label="discard")
+            ax.scatter(discards.index, pd.to_numeric(discards["prec@recall_val"], errors="coerce"),
+                       color="#fca5a5", s=40, marker="x", linewidths=1.8, zorder=4, label="discard (val)")
         if len(keeps):
-            kv = pd.to_numeric(keeps[col], errors="coerce")
-            ax.plot(keeps.index, kv, color="#d97706", linewidth=2.5, marker="o", markersize=7, zorder=5, label="keep")
-            ax.step(keeps.index, kv.cummax(), color="#d97706", linewidth=1, linestyle="--", alpha=0.4, zorder=4)
-            _annotate_improvements(ax, keeps, col, "#d97706")
-    ax.set_ylabel("Precision @ 80% Recall\n(OOT)", fontsize=10, fontweight="bold")
+            kval = pd.to_numeric(keeps["prec@recall_val"], errors="coerce")
+            ax.plot(keeps.index, kval, color="#d97706", linewidth=2.5,
+                    marker="o", markersize=7, zorder=6, label="keep (val) ← selection")
+            ax.step(keeps.index, kval.cummax(), color="#d97706", linewidth=1,
+                    linestyle="--", alpha=0.4, zorder=4)
+            _annotate_improvements(ax, keeps, "prec@recall_val", "#d97706")
+        ax.set_ylabel("Precision @ 80% Recall\n● val (line) | ◆ OOT (one per exp)", fontsize=10, fontweight="bold")
+    else:
+        if "prec@recall" in df.columns:
+            ax.scatter(df.index, pd.to_numeric(df["prec@recall"], errors="coerce"),
+                       color="#e5e7eb", s=25, zorder=2)
+            if len(keeps):
+                kv = pd.to_numeric(keeps["prec@recall"], errors="coerce")
+                ax.plot(keeps.index, kv, color="#d97706", linewidth=2.5, marker="o", markersize=7, zorder=5, label="keep")
+                ax.step(keeps.index, kv.cummax(), color="#d97706", linewidth=1, linestyle="--", alpha=0.4, zorder=4)
+                _annotate_improvements(ax, keeps, "prec@recall", "#d97706")
+        ax.set_ylabel("Precision @ 80% Recall\n(OOT)", fontsize=10, fontweight="bold")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper left", fontsize=8)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
