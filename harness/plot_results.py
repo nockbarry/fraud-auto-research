@@ -98,7 +98,7 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
     if has_val:
         # OOT: one amber diamond per experiment, no keep/discard distinction
         ax.scatter(df.index, pd.to_numeric(df["auprc"], errors="coerce"),
-                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
+                   color="#38bdf8", s=35, marker="D", zorder=3, alpha=0.8, label="OOT (all)")
 
         if len(discards):
             ax.scatter(discards.index, pd.to_numeric(discards["auprc_val"], errors="coerce"),
@@ -138,7 +138,7 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
 
         # OOT: one amber diamond per experiment, no keep/discard distinction
         ax.scatter(df.index, pd.to_numeric(df["auroc"], errors="coerce"),
-                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
+                   color="#38bdf8", s=35, marker="D", zorder=3, alpha=0.8, label="OOT (all)")
 
         if has_auroc_val:
             if len(discards):
@@ -173,7 +173,7 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
     if has_prec_val:
         # OOT: one amber diamond per experiment
         ax.scatter(df.index, pd.to_numeric(df["prec@recall"], errors="coerce"),
-                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
+                   color="#38bdf8", s=35, marker="D", zorder=3, alpha=0.8, label="OOT (all)")
         if len(discards):
             ax.scatter(discards.index, pd.to_numeric(discards["prec@recall_val"], errors="coerce"),
                        color="#fca5a5", s=40, marker="x", linewidths=1.8, zorder=4, label="discard (val)")
