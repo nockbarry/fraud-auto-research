@@ -1,15 +1,15 @@
 """Auto-updating experiment dashboard.
 
-Generates per-dataset plot PNGs at fixed paths and a static HTML page that
-references them. The HTML never changes — just the images get overwritten
-on each iteration.
+Generates per-dataset plot PNGs at fixed paths and a self-contained HTML page
+with all data embedded inline — no server or fetch() required.
+
+The HTML is fully regenerated on each call to update_dashboard(), so opening
+it via file:// works correctly. The 30-second meta-refresh reloads the whole
+page and picks up new data.
 
 Usage:
     python3 -m harness.dashboard          # regenerate everything
     python3 -m harness.dashboard --open   # regenerate and open in browser
-
-The HTML lives at: reports/dashboard.html
-Plots live at:     reports/plot_{dataset}.png
 """
 
 import json
@@ -29,7 +29,6 @@ REPORTS_DIR = ROOT_DIR / "reports"
 
 
 def _history_to_df(history: list[dict]) -> pd.DataFrame:
-    """Convert experiment tracker history to the DataFrame format plot_dataset expects."""
     rows = []
     for exp in history:
         ms = exp.get("metrics_summary", {})
@@ -47,7 +46,6 @@ def _history_to_df(history: list[dict]) -> pd.DataFrame:
 
 
 def _dataset_summary(history: list[dict], dataset: str) -> dict:
-    """Build summary stats for a dataset."""
     keeps = [e for e in history if e.get("status") == "keep"]
     discards = [e for e in history if e.get("status") == "discard"]
     sota = get_sota(dataset)
@@ -104,14 +102,62 @@ def update_plots() -> dict[str, str]:
     return paths
 
 
-def generate_dashboard_html():
-    """Write the static HTML dashboard that references plot images by fixed paths."""
+def _image_to_data_uri(path: str) -> str:
+    """Read a PNG and return a base64 data URI."""
+    import base64
+    try:
+        data = Path(path).read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:image/png;base64,{b64}"
+    except Exception:
+        return ""
+
+
+def generate_dashboard_html(data: dict) -> str:
+    """Generate self-contained HTML with all data and images embedded inline."""
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     html_path = REPORTS_DIR / "dashboard.html"
 
-    # This HTML references images at ./plot_{dataset}.png
-    # It auto-refreshes every 30 seconds to pick up new plots
-    html = """<!DOCTYPE html>
+    datasets = data.get("datasets", {})
+    last_updated = data.get("last_updated", "")
+    total_exp = sum(d["total"] for d in datasets.values())
+    total_keep = sum(d["kept"] for d in datasets.values())
+    best_auprc = max((d.get("best_auprc", 0) for d in datasets.values()), default=0)
+
+    # Build summary cards HTML
+    cards_html = f"""
+        <div class="card blue"><div class="label">Datasets</div><div class="value">{len(datasets)}</div></div>
+        <div class="card purple"><div class="label">Experiments</div><div class="value">{total_exp}</div></div>
+        <div class="card green"><div class="label">Kept</div><div class="value">{total_keep}</div></div>
+        <div class="card amber"><div class="label">Best AUPRC</div><div class="value">{best_auprc:.4f}</div></div>
+    """
+
+    # Build per-dataset sections with embedded images
+    datasets_html = ""
+    for name, ds in datasets.items():
+        img_path = str(REPORTS_DIR / f"plot_{name}.png")
+        img_src = _image_to_data_uri(img_path)
+        img_tag = f'<img src="{img_src}" alt="{name} results">' if img_src else ""
+
+        datasets_html += f"""
+        <div class="dataset-section">
+            <h2>{name}</h2>
+            <div class="subtitle">{ds.get("sota_hypothesis", "")}</div>
+            <div class="stats-row">
+                <div class="stat">Experiments: <strong>{ds["total"]}</strong></div>
+                <div class="stat">Kept: <span class="num">{ds["kept"]}</span></div>
+                <div class="stat">Discarded: <strong>{ds["discarded"]}</strong></div>
+                <div class="stat">AUPRC: <span class="num">{ds.get("best_auprc", 0):.4f}</span></div>
+                <div class="stat">Baseline: <strong>{ds.get("baseline_auprc", 0):.4f}</strong></div>
+                <div class="stat">Improvement: <span class="num">+{ds.get("improvement_pct", 0):.1f}%</span></div>
+            </div>
+            {img_tag}
+        </div>
+        """
+
+    ts_display = last_updated.replace("T", " ")[:19] if last_updated else ""
+
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -119,102 +165,45 @@ def generate_dashboard_html():
     <meta http-equiv="refresh" content="30">
     <title>Fraud Auto-Research Dashboard</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
-        .header { background: #1e293b; padding: 20px 32px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
-        .header h1 { font-size: 22px; font-weight: 600; }
-        .header .meta { font-size: 13px; color: #94a3b8; }
-        .header .live { color: #22c55e; font-size: 12px; }
-        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
-        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .card { background: #1e293b; border-radius: 10px; padding: 16px; text-align: center; }
-        .card .value { font-size: 28px; font-weight: 700; margin: 4px 0; }
-        .card .label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-        .card.green .value { color: #22c55e; }
-        .card.blue .value { color: #3b82f6; }
-        .card.amber .value { color: #f59e0b; }
-        .card.purple .value { color: #a78bfa; }
-        .dataset-section { background: #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 24px; }
-        .dataset-section h2 { font-size: 18px; margin-bottom: 4px; }
-        .dataset-section .subtitle { font-size: 13px; color: #94a3b8; margin-bottom: 16px; }
-        .dataset-section img { width: 100%; border-radius: 8px; background: white; }
-        .stats-row { display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }
-        .stat { font-size: 13px; }
-        .stat strong { color: #f8fafc; }
-        .stat .num { color: #22c55e; font-weight: 600; }
-        .footer { text-align: center; padding: 16px; font-size: 11px; color: #475569; }
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }}
+        .header {{ background: #1e293b; padding: 20px 32px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }}
+        .header h1 {{ font-size: 22px; font-weight: 600; }}
+        .header .meta {{ font-size: 13px; color: #94a3b8; }}
+        .header .live {{ color: #22c55e; font-size: 12px; }}
+        .container {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
+        .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }}
+        .card {{ background: #1e293b; border-radius: 10px; padding: 16px; text-align: center; }}
+        .card .value {{ font-size: 28px; font-weight: 700; margin: 4px 0; }}
+        .card .label {{ font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .card.green .value {{ color: #22c55e; }}
+        .card.blue .value {{ color: #3b82f6; }}
+        .card.amber .value {{ color: #f59e0b; }}
+        .card.purple .value {{ color: #a78bfa; }}
+        .dataset-section {{ background: #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 24px; }}
+        .dataset-section h2 {{ font-size: 18px; margin-bottom: 4px; }}
+        .dataset-section .subtitle {{ font-size: 13px; color: #94a3b8; margin-bottom: 16px; }}
+        .dataset-section img {{ width: 100%; border-radius: 8px; background: white; }}
+        .stats-row {{ display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }}
+        .stat {{ font-size: 13px; }}
+        .stat strong {{ color: #f8fafc; }}
+        .stat .num {{ color: #22c55e; font-weight: 600; }}
+        .footer {{ text-align: center; padding: 16px; font-size: 11px; color: #475569; }}
     </style>
 </head>
 <body>
     <div class="header">
         <div>
             <h1>Fraud Auto-Research Dashboard</h1>
-            <span class="meta" id="timestamp"></span>
+            <span class="meta">Last updated: {ts_display}</span>
         </div>
         <span class="live">AUTO-REFRESH 30s</span>
     </div>
     <div class="container">
-        <div class="cards" id="summary-cards"></div>
-        <div id="datasets"></div>
+        <div class="cards">{cards_html}</div>
+        <div id="datasets">{datasets_html}</div>
     </div>
-    <div class="footer">Plots auto-regenerate after each experiment. Page auto-refreshes every 30 seconds.</div>
-
-    <script>
-        // Load summary.json and build the page dynamically
-        async function loadDashboard() {
-            const ts = new Date().toLocaleString();
-            document.getElementById('timestamp').textContent = 'Last refresh: ' + ts;
-
-            try {
-                const resp = await fetch('./dashboard_data.json?' + Date.now());
-                const data = await resp.json();
-                renderCards(data);
-                renderDatasets(data);
-            } catch(e) {
-                // If JSON not available, just show the images
-                document.getElementById('datasets').innerHTML = '<p style="color:#94a3b8;text-align:center">Waiting for experiment data...</p>';
-            }
-        }
-
-        function renderCards(data) {
-            const datasets = Object.values(data.datasets || {});
-            const totalExp = datasets.reduce((s, d) => s + d.total, 0);
-            const totalKeep = datasets.reduce((s, d) => s + d.kept, 0);
-            const bestAuprc = Math.max(...datasets.map(d => d.best_auprc || 0));
-            const html = `
-                <div class="card blue"><div class="label">Datasets</div><div class="value">${datasets.length}</div></div>
-                <div class="card purple"><div class="label">Experiments</div><div class="value">${totalExp}</div></div>
-                <div class="card green"><div class="label">Kept</div><div class="value">${totalKeep}</div></div>
-                <div class="card amber"><div class="label">Best AUPRC</div><div class="value">${bestAuprc.toFixed(4)}</div></div>
-            `;
-            document.getElementById('summary-cards').innerHTML = html;
-        }
-
-        function renderDatasets(data) {
-            let html = '';
-            for (const [name, ds] of Object.entries(data.datasets || {})) {
-                const imgSrc = './plot_' + name + '.png?' + Date.now();
-                html += `
-                    <div class="dataset-section">
-                        <h2>${name}</h2>
-                        <div class="subtitle">${ds.sota_hypothesis || ''}</div>
-                        <div class="stats-row">
-                            <div class="stat">Experiments: <strong>${ds.total}</strong></div>
-                            <div class="stat">Kept: <span class="num">${ds.kept}</span></div>
-                            <div class="stat">Discarded: <strong>${ds.discarded}</strong></div>
-                            <div class="stat">AUPRC: <span class="num">${(ds.best_auprc || 0).toFixed(4)}</span></div>
-                            <div class="stat">Baseline: <strong>${(ds.baseline_auprc || 0).toFixed(4)}</strong></div>
-                            <div class="stat">Improvement: <span class="num">+${(ds.improvement_pct || 0).toFixed(1)}%</span></div>
-                        </div>
-                        <img src="${imgSrc}" alt="${name} results" onerror="this.style.display='none'">
-                    </div>
-                `;
-            }
-            document.getElementById('datasets').innerHTML = html;
-        }
-
-        loadDashboard();
-    </script>
+    <div class="footer">Plots and data regenerated after each experiment. Page auto-refreshes every 30 seconds.</div>
 </body>
 </html>"""
 
@@ -222,9 +211,9 @@ def generate_dashboard_html():
     return str(html_path)
 
 
-def update_dashboard_data():
-    """Write the JSON data file the dashboard HTML reads."""
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+def update_dashboard():
+    """Regenerate plots, build data, write self-contained HTML."""
+    update_plots()
 
     data = {"datasets": {}, "last_updated": datetime.now().isoformat()}
     for ds in list_datasets():
@@ -232,21 +221,14 @@ def update_dashboard_data():
         if history:
             data["datasets"][ds] = _dataset_summary(history, ds)
 
+    # Also write the JSON file (for external tooling / debugging)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     json_path = REPORTS_DIR / "dashboard_data.json"
     with open(json_path, "w") as f:
         json.dump(data, f, indent=2)
 
-
-def update_dashboard():
-    """Regenerate plots, data, and ensure HTML exists."""
-    update_plots()
-    update_dashboard_data()
-
-    html_path = REPORTS_DIR / "dashboard.html"
-    if not html_path.exists():
-        generate_dashboard_html()
-
-    print(f"  Dashboard updated: {REPORTS_DIR}/dashboard.html")
+    html_path = generate_dashboard_html(data)
+    print(f"  Dashboard updated: {html_path}")
 
 
 if __name__ == "__main__":

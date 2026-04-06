@@ -9,20 +9,25 @@ You are an autonomous researcher. You propose features, build models, evaluate r
 2. **Create the branch**: `git checkout -b research/<tag>` from current main.
 3. **Read the in-scope files**:
    - The config file for this run (e.g., `configs/ieee-cis.yaml` or `configs/fraud-sim.yaml`). Do not modify.
-   - `features.py` — feature transforms. You modify this. **Uses fit/transform API.**
-   - `model.py` — model training. You modify this.
+   - The features file for your dataset — specified in the config as `features_file`:
+     - IEEE-CIS: `features_ieee.py`
+     - Fraud-Sim: `features_sim.py`
+   - The model file for your dataset — specified in the config as `model_file`:
+     - IEEE-CIS: `model_ieee.py`
+     - Fraud-Sim: `model_sim.py`
    - `harness/evaluate.py` — evaluation pipeline. Do not modify.
+   - **IMPORTANT**: Edit ONLY your dataset's specific files. Do not touch the other dataset's files.
 4. **Establish baseline**: Run the pipeline as-is to record the baseline score.
 5. **Begin the loop**.
 
 ## Scope
 
 **What you CAN modify:**
-- `features.py` — Your primary workspace. Contains `fit()` and `transform()`:
+- `features_{dataset}.py` — Your primary workspace (e.g., `features_ieee.py` or `features_sim.py`). Contains `fit()` and `transform()`:
   - `fit(df_train, y_train, config) -> state`: Called ONCE on training data WITH labels. Return a JSON-serializable dict.
   - `transform(df, state, config) -> df`: Called on EACH split WITHOUT labels. Use only the state dict.
   - **YOU CANNOT ACCESS LABELS IN transform()**. The harness strips them. Any target-dependent features must be computed in `fit()` and stored in `state`.
-- `model.py` — Change hyperparameters, algorithms, ensemble. Signature must not change.
+- `model_{dataset}.py` — Change hyperparameters, algorithms, ensemble. Signature must not change. GPU is auto-detected.
 
 **What you CANNOT modify:**
 - Anything in `harness/` — fixed evaluation infrastructure.
@@ -81,17 +86,17 @@ The `sota` symlink always points to the current best. Use `--save` flag to auto-
 
 ## Available Datasets
 
-### IEEE-CIS (configs/ieee-cis.yaml)
+### IEEE-CIS (configs/ieee-cis.yaml) — features_ieee.py / model_ieee.py
 - 590K card-not-present transactions from Vesta Corporation
 - 55 raw columns (V/C/D/M derived features stripped)
 - 3.5% fraud rate, chargeback-based labels
-- Baseline AUPRC: ~0.20 | Full-feature ceiling: 0.4982
+- Current SOTA AUPRC: ~0.264 | Full-feature ceiling: 0.4982
 
-### Fraud-Sim (configs/fraud-sim.yaml)
+### Fraud-Sim (configs/fraud-sim.yaml) — features_sim.py / model_sim.py
 - 1.8M simulated credit card transactions
 - 16 raw columns: merchant, category, amount, geo, demographics
-- 0.5% fraud rate
-- Baseline AUPRC: ~0.04 (lots of room for improvement)
+- 0.5% fraud rate, 42% population shift in OOT
+- Current SOTA AUPRC: ~0.543
 
 ## Feature Engineering Strategy
 

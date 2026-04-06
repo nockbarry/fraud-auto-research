@@ -194,7 +194,12 @@ def run_evaluation(config: dict | None = None) -> dict:
     print("Step 3: Fitting feature state on train...")
     sys.path.insert(0, str(ROOT_DIR))
     import importlib
-    import features as features_mod
+
+    features_file = config.get("features_file", "features.py")
+    features_module_name = features_file.replace(".py", "")
+    if features_module_name in sys.modules:
+        del sys.modules[features_module_name]
+    features_mod = importlib.import_module(features_module_name)
     importlib.reload(features_mod)
 
     fit_state = features_mod.fit(df_train.copy(), pd.Series(y_train), config)
@@ -243,7 +248,13 @@ def run_evaluation(config: dict | None = None) -> dict:
     X_val = _prepare_features(df_val)
     X_oot = _prepare_features(df_oot)
 
-    from model import train_and_evaluate
+    model_file = config.get("model_file", "model.py")
+    model_module_name = model_file.replace(".py", "")
+    if model_module_name in sys.modules:
+        del sys.modules[model_module_name]
+    model_mod = importlib.import_module(model_module_name)
+    importlib.reload(model_mod)
+    train_and_evaluate = model_mod.train_and_evaluate
 
     model_result = train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config)
     training_seconds = time.time() - train_start
@@ -368,11 +379,15 @@ def save_experiment(config: dict, results: dict, hypothesis: str, status: str, s
     from harness.experiment_tracker import save_experiment as _save
 
     dataset = config.get("dataset_name", "unknown")
+    features_file = ROOT_DIR / config.get("features_file", "features.py")
+    model_file = ROOT_DIR / config.get("model_file", "model.py")
     return _save(
         dataset=dataset,
         hypothesis=hypothesis,
         status=status,
         metrics=results,
+        features_py_path=features_file,
+        model_py_path=model_file,
         state=state,
         config_snapshot={
             "target_recall": config.get("metrics", {}).get("target_recall"),

@@ -1,0 +1,29 @@
+{
+  "datasets": {
+    "fraud-sim": {
+      "dataset": "fraud-sim",
+      "total": 9,
+      "kept": 4,
+      "discarded": 5,
+      "best_auprc": 0.608946,
+      "baseline_auprc": 0.036921,
+      "improvement_pct": 1549.3215243357436,
+      "best_composite": 0.396649,
+      "best_prec": 0.3308,
+      "sota_hypothesis": "customer x category amount corridors: cc_amt_ratio_median and cc_amt_zscore on top of SOTA"
+    },
+    "ieee-cis": {
+      "dataset": "ieee-cis",
+      "total": 8,
+      "kept": 2,
+      "discarded": 6,
+      "best_auprc": 0.264372,
+      "baseline_auprc": 0.200912,
+      "improvement_pct": 31.5859679859839,
+      "best_composite": 0.150761,
+      "best_prec": 0.061915,
+      "sota_hypothesis": "seed: v2 best features + GPU ensemble"
+    }
+  },
+  "last_updated": "2026-04-05T21:35:52.119748"
+}

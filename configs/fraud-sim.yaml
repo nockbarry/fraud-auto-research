@@ -1,5 +1,7 @@
 # Simulated Fraud Detection — rich raw transaction features
 dataset_name: "fraud-sim"
+features_file: "features_sim.py"
+model_file: "model_sim.py"
 dataset_description: "Simulated credit card transactions, 1.8M txns, 1000 customers, 800 merchants, rich raw features"
 
 local_data:
