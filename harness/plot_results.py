@@ -96,17 +96,13 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
     has_val = "auprc_val" in df.columns and df["auprc_val"].notna().any()
 
     if has_val:
-        # Background: OOT for all experiments
+        # OOT: one amber diamond per experiment, no keep/discard distinction
         ax.scatter(df.index, pd.to_numeric(df["auprc"], errors="coerce"),
-                   color="#d1fae5", s=20, zorder=2, alpha=0.6, label="OOT (all)")
+                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
 
         if len(discards):
-            # Discards: val score as red X
             ax.scatter(discards.index, pd.to_numeric(discards["auprc_val"], errors="coerce"),
                        color="#fca5a5", s=40, marker="x", linewidths=1.8, zorder=4, label="discard (val)")
-            # Discards OOT: small orange dot
-            ax.scatter(discards.index, pd.to_numeric(discards["auprc"], errors="coerce"),
-                       color="#fed7aa", s=18, marker="D", alpha=0.5, zorder=3, label="discard (OOT)")
 
         if len(crashes):
             ax.scatter(crashes.index, pd.to_numeric(crashes["auprc_val"], errors="coerce"),
@@ -114,18 +110,13 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
 
         if len(keeps):
             kval = pd.to_numeric(keeps["auprc_val"], errors="coerce")
-            koot = pd.to_numeric(keeps["auprc"], errors="coerce")
-            # Val line (selection signal)
             ax.plot(keeps.index, kval, color="#059669", linewidth=2.5,
                     marker="o", markersize=7, zorder=6, label="keep (val) ← selection")
             ax.step(keeps.index, kval.cummax(), color="#059669", linewidth=1,
                     linestyle="--", alpha=0.4, zorder=4)
-            # OOT points (held-out generalization)
-            ax.scatter(keeps.index, koot, color="#f59e0b", s=70,
-                       marker="D", zorder=7, label="keep (OOT) ← held-out")
             _annotate_improvements(ax, keeps, "auprc_val", "#059669")
 
-        ax.set_ylabel("AUPRC\n● val (line) | ◆ OOT (dots)", fontsize=10, fontweight="bold")
+        ax.set_ylabel("AUPRC\n● val (line) | ◆ OOT (one per exp)", fontsize=10, fontweight="bold")
     else:
         # Fallback: single series
         vals = pd.to_numeric(df["auprc"], errors="coerce")
@@ -145,32 +136,27 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
         ax = axes[2]
         has_auroc_val = "auroc_val" in df.columns and df["auroc_val"].notna().any()
 
+        # OOT: one amber diamond per experiment, no keep/discard distinction
         ax.scatter(df.index, pd.to_numeric(df["auroc"], errors="coerce"),
-                   color="#e0e7ff", s=20, zorder=2, alpha=0.6, label="OOT (all)")
+                   color="#f59e0b", s=35, marker="D", zorder=3, alpha=0.7, label="OOT (all)")
 
-        if has_auroc_val and len(discards):
-            ax.scatter(discards.index, pd.to_numeric(discards["auroc_val"], errors="coerce"),
-                       color="#fca5a5", s=40, marker="x", linewidths=1.8, zorder=4, label="discard (val)")
-            ax.scatter(discards.index, pd.to_numeric(discards["auroc"], errors="coerce"),
-                       color="#fed7aa", s=18, marker="D", alpha=0.5, zorder=3, label="discard (OOT)")
-
-        if len(keeps):
-            if has_auroc_val:
+        if has_auroc_val:
+            if len(discards):
+                ax.scatter(discards.index, pd.to_numeric(discards["auroc_val"], errors="coerce"),
+                           color="#fca5a5", s=40, marker="x", linewidths=1.8, zorder=4, label="discard (val)")
+            if len(keeps):
                 kval = pd.to_numeric(keeps["auroc_val"], errors="coerce")
-                koot = pd.to_numeric(keeps["auroc"], errors="coerce")
                 ax.plot(keeps.index, kval, color="#6366f1", linewidth=2.5,
                         marker="o", markersize=7, zorder=6, label="keep (val) ← selection")
                 ax.step(keeps.index, kval.cummax(), color="#6366f1", linewidth=1,
                         linestyle="--", alpha=0.4, zorder=4)
-                ax.scatter(keeps.index, koot, color="#f59e0b", s=70,
-                           marker="D", zorder=7, label="keep (OOT) ← held-out")
                 _annotate_improvements(ax, keeps, "auroc_val", "#6366f1")
-            else:
-                kv = pd.to_numeric(keeps["auroc"], errors="coerce")
-                ax.plot(keeps.index, kv, color="#6366f1", linewidth=2.5, marker="o", markersize=7, zorder=5, label="keep")
-                _annotate_improvements(ax, keeps, "auroc", "#6366f1")
+        elif len(keeps):
+            kv = pd.to_numeric(keeps["auroc"], errors="coerce")
+            ax.plot(keeps.index, kv, color="#6366f1", linewidth=2.5, marker="o", markersize=7, zorder=5, label="keep")
+            _annotate_improvements(ax, keeps, "auroc", "#6366f1")
 
-        ax.set_ylabel("AUROC\n● val (line) | ◆ OOT (dots)", fontsize=10, fontweight="bold")
+        ax.set_ylabel("AUROC\n● val (line) | ◆ OOT (one per exp)", fontsize=10, fontweight="bold")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left", fontsize=8)
         ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))

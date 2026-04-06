@@ -332,7 +332,7 @@ def generate_dashboard_html(data: dict) -> str:
     </div>
     <div class="footer">
         ● val (green line) = drives keep/discard &nbsp;|&nbsp;
-        ◆ OOT (amber dots) = held-out generalization &nbsp;|&nbsp;
+        ◆ OOT (amber, one per experiment) = held-out generalization &nbsp;|&nbsp;
         Plots and data regenerated after each experiment.
     </div>
 </body>
