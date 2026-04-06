@@ -35,6 +35,7 @@ def _history_to_df(history: list[dict]) -> pd.DataFrame:
         rows.append({
             "composite": ms.get("composite_score", 0) or 0,
             "auprc": ms.get("auprc", 0) or 0,
+            "auprc_val": ms.get("auprc_val", 0) or 0,
             "prec@recall": ms.get("precision_at_recall", 0) or 0,
             "psi": ms.get("psi", 0) or 0,
             "status": exp.get("status", "discard"),

@@ -38,8 +38,8 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
     fig.suptitle(f"Fraud Auto-Research: {dataset_name}", fontsize=16, fontweight="bold", y=0.98)
 
     metrics = [
-        ("composite", "Composite Score", "#2563eb", True),
-        ("auprc", "AUPRC (OOT)", "#059669", True),
+        ("composite", "Composite Score (val)", "#2563eb", True),
+        ("auprc", "AUPRC", "#059669", True),          # special: plots both val+OOT
         ("prec@recall", "Precision @ 80% Recall", "#d97706", True),
         ("psi", "PSI (Val\u2192OOT)", "#dc2626", False),
     ]
@@ -69,13 +69,24 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
         if len(keeps) > 0:
             keep_vals = pd.to_numeric(keeps[col], errors="coerce")
             ax.plot(keeps.index, keep_vals, color=color, linewidth=2.5,
-                   marker="o", markersize=7, zorder=5, label="keep")
+                   marker="o", markersize=7, zorder=5, label="keep (OOT)" if col == "auprc" else "keep")
 
             running_best = keep_vals.cummax() if higher_better else keep_vals.cummin()
             ax.step(keeps.index, running_best, color=color, linewidth=1,
                    linestyle="--", alpha=0.5, zorder=4, label="best so far")
 
-            # Annotate improvements
+            # For AUPRC panel: overlay val AUPRC as a secondary line
+            if col == "auprc" and "auprc_val" in df.columns:
+                keep_vals_val = pd.to_numeric(keeps["auprc_val"], errors="coerce")
+                ax.plot(keeps.index, keep_vals_val, color="#34d399", linewidth=1.8,
+                       marker="s", markersize=5, zorder=4, linestyle=":", alpha=0.85,
+                       label="keep (val, drives selection)")
+                # Also scatter val for discards
+                if len(discards) > 0 and "auprc_val" in discards.columns:
+                    ax.scatter(discards.index, pd.to_numeric(discards["auprc_val"], errors="coerce"),
+                              color="#6ee7b7", s=20, zorder=3, marker="s", alpha=0.5, label="_nolegend_")
+
+            # Annotate improvements (on the primary col)
             prev_best = None
             ann_idx = 0
             for idx, row in keeps.iterrows():
@@ -119,7 +130,10 @@ def plot_dataset(df: pd.DataFrame, dataset_name: str, out_path: str):
             ax.axhline(y=0.20, color="#fbbf24", linestyle="--", alpha=0.7, label="penalty threshold")
             ax.axhline(y=0.25, color="#ef4444", linestyle="--", alpha=0.7, label="hard reject")
 
-        ax.set_ylabel(title, fontsize=11, fontweight="bold")
+        if col == "auprc":
+            title = "AUPRC (solid=OOT held-out, dotted=val selection)"
+
+        ax.set_ylabel(title, fontsize=10, fontweight="bold")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper left" if higher_better else "upper right", fontsize=8)
         ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))

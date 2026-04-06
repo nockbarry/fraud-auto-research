@@ -144,9 +144,14 @@ def save_experiment(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "parent_exp": parent_exp or (sota["id"] if sota else None),
         "metrics_summary": {
+            # Val-based (drive keep/discard)
             "composite_score": clean_metrics.get("composite_score"),
-            "auprc": clean_metrics.get("auprc"),
             "auprc_val": clean_metrics.get("auprc_val"),
+            "precision_at_recall_val": clean_metrics.get("precision_at_recall_val"),
+            "auprc_val_ci": clean_metrics.get("auprc_val_ci"),
+            # OOT-based (held-out reporting)
+            "auprc": clean_metrics.get("auprc"),
+            "composite_score_oot": clean_metrics.get("composite_score_oot"),
             "precision_at_recall": clean_metrics.get("precision_at_recall"),
             "psi": clean_metrics.get("psi"),
             "n_features": clean_metrics.get("n_features"),

@@ -152,11 +152,17 @@ def generate_context(dataset: str) -> str:
     # SOTA summary
     if sota:
         ms = sota.get("metrics_summary", {})
-        lines.append(f"\nSOTA: {sota['id']} — AUPRC={ms.get('auprc', '?'):.4f}, Composite={ms.get('composite_score', '?'):.4f}")
+        auprc_val = ms.get("auprc_val") or ms.get("auprc_val", ms.get("auprc"))
+        auprc_oot = ms.get("auprc")
+        composite = ms.get("composite_score")
+        lines.append(f"\nSOTA: {sota['id']} — AUPRC_val={auprc_val:.4f} | AUPRC_oot={auprc_oot:.4f} | Composite(val)={composite:.4f}")
         lines.append(f"  Hypothesis: {sota.get('hypothesis', '?')}")
-        ci = ms.get("auprc_ci")
-        if ci:
-            lines.append(f"  AUPRC 95% CI: [{ci[0]:.4f}, {ci[1]:.4f}]")
+        val_ci = ms.get("auprc_val_ci")
+        oot_ci = ms.get("auprc_ci")
+        if val_ci:
+            lines.append(f"  AUPRC_val 95% CI: [{val_ci[0]:.4f}, {val_ci[1]:.4f}]")
+        if oot_ci:
+            lines.append(f"  AUPRC_oot 95% CI: [{oot_ci[0]:.4f}, {oot_ci[1]:.4f}]")
         lines.append(f"  Features: {ms.get('n_features', '?')}")
 
     # Top features from SOTA
@@ -170,11 +176,15 @@ def generate_context(dataset: str) -> str:
 
     baseline = keeps[0] if keeps else None
     if baseline and sota:
-        baseline_auprc = baseline.get("metrics_summary", {}).get("auprc", 0) or 0
-        sota_auprc = sota.get("metrics_summary", {}).get("auprc", 0) or 0
-        if baseline_auprc > 0:
-            pct = (sota_auprc / baseline_auprc - 1) * 100
-            lines.append(f"  Improvement: {baseline_auprc:.4f} -> {sota_auprc:.4f} ({pct:+.1f}%)")
+        ms_b = baseline.get("metrics_summary", {})
+        ms_s = sota.get("metrics_summary", {})
+        # Show both val and OOT improvement
+        for label, key in [("val", "auprc_val"), ("oot", "auprc")]:
+            b_val = ms_b.get(key) or 0
+            s_val = ms_s.get(key) or 0
+            if b_val > 0:
+                pct = (s_val / b_val - 1) * 100
+                lines.append(f"  Improvement ({label}): {b_val:.4f} -> {s_val:.4f} ({pct:+.1f}%)")
 
     # Recent experiments
     lines.append(f"\nLast 10 experiments:")

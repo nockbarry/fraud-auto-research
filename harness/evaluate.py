@@ -282,11 +282,13 @@ def run_evaluation(config: dict | None = None) -> dict:
 
     auprc_val = average_precision_score(y_val, y_val_pred)
     auprc_oot = average_precision_score(y_oot, y_oot_pred)
-    prec_at_rec, threshold = precision_at_recall(y_oot, y_oot_pred, target_recall)
+    # Val metrics drive keep/discard — OOT is held-out reporting only
+    prec_at_rec_val, threshold_val = precision_at_recall(y_val, y_val_pred, target_recall)
+    prec_at_rec_oot, threshold_oot = precision_at_recall(y_oot, y_oot_pred, target_recall)
     psi = score_psi(y_val_pred, y_oot_pred)
 
-    # FPR and review burden at operating threshold
-    y_oot_binary = (y_oot_pred >= threshold).astype(int)
+    # FPR and review burden reported at OOT operating threshold
+    y_oot_binary = (y_oot_pred >= threshold_oot).astype(int)
     fp = ((y_oot_binary == 1) & (y_oot == 0)).sum()
     tn = ((y_oot_binary == 0) & (y_oot == 0)).sum()
     fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
@@ -294,23 +296,32 @@ def run_evaluation(config: dict | None = None) -> dict:
     actual_fraud = y_oot.sum()
     review_burden = flagged / actual_fraud if actual_fraud > 0 else 0.0
 
-    comp_score, psi_rejected = composite_score(auprc_oot, prec_at_rec, psi, config)
+    # Composite is VAL-based — drives keep/discard without touching OOT
+    comp_score, psi_rejected = composite_score(auprc_val, prec_at_rec_val, psi, config)
+    # OOT composite computed separately for reporting only
+    comp_score_oot, _ = composite_score(auprc_oot, prec_at_rec_oot, psi, config)
 
-    # Step 7b: Bootstrap confidence intervals
+    # Step 7b: Bootstrap confidence intervals on OOT
     auprc_ci = _bootstrap_ci(y_oot, y_oot_pred, average_precision_score)
     prec_ci = _bootstrap_ci(y_oot, y_oot_pred, lambda yt, yp: precision_at_recall(yt, yp, target_recall)[0])
+    auprc_val_ci = _bootstrap_ci(y_val, y_val_pred, average_precision_score)
 
     total_seconds = time.time() - total_start
     n_features = X_train.shape[1]
 
     results = {
+        # Selection metrics (val-based — these drive keep/discard)
         "composite_score": comp_score,
         "psi_rejected": psi_rejected,
-        "auprc": auprc_oot,
         "auprc_val": auprc_val,
-        "precision_at_recall": prec_at_rec,
+        "precision_at_recall_val": prec_at_rec_val,
+        "auprc_val_ci": auprc_val_ci,
+        # Reporting metrics (OOT — held-out, never used for selection)
+        "auprc": auprc_oot,
+        "precision_at_recall": prec_at_rec_oot,
+        "composite_score_oot": comp_score_oot,
         "target_recall": target_recall,
-        "operating_threshold": threshold,
+        "operating_threshold": threshold_oot,
         "psi": psi,
         "fpr": fpr,
         "review_burden": review_burden,
@@ -340,13 +351,15 @@ def print_results(results: dict):
         return
 
     print("\n---")
-    print(f"composite_score:     {results['composite_score']:.6f}")
+    print(f"composite_score:         {results['composite_score']:.6f}  (val-based: drives keep/discard)")
+    print(f"composite_score_oot:     {results.get('composite_score_oot', 0):.6f}  (OOT: reporting only)")
     if results.get("psi_rejected"):
-        print(f"psi_rejected:        true")
-    print(f"auprc:               {results['auprc']:.6f}")
-    print(f"auprc_val:           {results['auprc_val']:.6f}")
-    print(f"precision_at_recall: {results['precision_at_recall']:.6f}")
-    print(f"target_recall:       {results['target_recall']:.2f}")
+        print(f"psi_rejected:            true")
+    print(f"auprc_val:               {results['auprc_val']:.6f}  (SELECTION)")
+    print(f"auprc:                   {results['auprc']:.6f}  (OOT / held-out)")
+    print(f"precision_at_recall_val: {results.get('precision_at_recall_val', 0):.6f}  (SELECTION)")
+    print(f"precision_at_recall:     {results['precision_at_recall']:.6f}  (OOT)")
+    print(f"target_recall:           {results['target_recall']:.2f}")
     print(f"operating_threshold: {results['operating_threshold']:.6f}")
     print(f"psi:                 {results['psi']:.6f}")
     print(f"fpr:                 {results['fpr']:.6f}")
@@ -364,8 +377,10 @@ def print_results(results: dict):
     print(f"leakage_warnings:    {len(leakage)}")
     for w in leakage:
         print(f"  {w}")
+    val_ci = results.get("auprc_val_ci", (0, 0))
+    print(f"auprc_val_ci:        [{val_ci[0]:.4f}, {val_ci[1]:.4f}]")
     ci = results.get("auprc_ci", (0, 0))
-    print(f"auprc_ci:            [{ci[0]:.4f}, {ci[1]:.4f}]")
+    print(f"auprc_oot_ci:        [{ci[0]:.4f}, {ci[1]:.4f}]")
     pci = results.get("precision_ci", (0, 0))
     print(f"precision_ci:        [{pci[0]:.4f}, {pci[1]:.4f}]")
     top = results.get("top_features", {})
