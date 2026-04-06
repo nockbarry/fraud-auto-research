@@ -100,7 +100,7 @@ The `sota` symlink always points to the current best. Use `--save` flag to auto-
 
 ## Feature Engineering Strategy
 
-Read `recipes.md` for copy-paste code patterns. Read `dataset_profile` in the config for dataset characteristics.
+Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SOTA techniques by fraud type. Read `dataset_profile` in the config for dataset characteristics.
 
 **Priority order** (by expected impact):
 
