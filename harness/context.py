@@ -190,9 +190,12 @@ def generate_context(dataset: str) -> str:
     lines.append(f"\nTechnique success rates:")
     cat_results = defaultdict(lambda: {"keep": 0, "discard": 0})
     for exp in history:
+        status = exp.get("status", "discard")
+        if status not in ("keep", "discard"):
+            continue  # skip crash / unknown statuses
         cats = _categorize_experiment(exp)
         for cat in cats:
-            cat_results[cat][exp.get("status", "discard")] += 1
+            cat_results[cat][status] += 1
 
     for cat, counts in sorted(cat_results.items(), key=lambda x: -(x[1]["keep"])):
         total = counts["keep"] + counts["discard"]
