@@ -6,7 +6,7 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 ## Live Results
 
-**[→ View full dashboard](reports/dashboard.html)** — self-contained HTML, download and open locally or view via GitHub Pages.
+**[→ View full dashboard](https://nockbarry.github.io/fraud-auto-research/reports/dashboard.html)**
 
 ![Fraud-Sim results](reports/plot_fraud-sim.png)
 
