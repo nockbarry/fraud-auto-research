@@ -2,28 +2,28 @@
   "datasets": {
     "fraud-sim": {
       "dataset": "fraud-sim",
-      "total": 9,
-      "kept": 4,
-      "discarded": 5,
-      "best_auprc": 0.608946,
-      "baseline_auprc": 0.036921,
-      "improvement_pct": 1549.3215243357436,
-      "best_composite": 0.396649,
-      "best_prec": 0.3308,
-      "sota_hypothesis": "customer x category amount corridors: cc_amt_ratio_median and cc_amt_zscore on top of SOTA"
+      "total": 2,
+      "kept": 1,
+      "discarded": 1,
+      "best_auprc": 0.498532,
+      "baseline_auprc": 0.498532,
+      "improvement_pct": 0.0,
+      "best_composite": 0.280684,
+      "best_prec": 0.104727,
+      "sota_hypothesis": "clean baseline: target encoding + freq encoding + behavioral amount deviations + time features"
     },
     "ieee-cis": {
       "dataset": "ieee-cis",
-      "total": 8,
-      "kept": 2,
-      "discarded": 6,
-      "best_auprc": 0.264372,
-      "baseline_auprc": 0.200912,
-      "improvement_pct": 31.5859679859839,
-      "best_composite": 0.150761,
-      "best_prec": 0.061915,
-      "sota_hypothesis": "seed: v2 best features + GPU ensemble"
+      "total": 3,
+      "kept": 1,
+      "discarded": 1,
+      "best_auprc": 0.178454,
+      "baseline_auprc": 0.178454,
+      "improvement_pct": 0.0,
+      "best_composite": 0.109904,
+      "best_prec": 0.068924,
+      "sota_hypothesis": "clean baseline: target encoding + freq encoding + basic amount/time features"
     }
   },
-  "last_updated": "2026-04-05T21:35:52.119748"
+  "last_updated": "2026-04-05T22:05:24.602598"
 }
