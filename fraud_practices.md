@@ -1275,3 +1275,325 @@ xgb.XGBClassifier(
 
 **Feature selection note:** At 100–400 features, recursive feature elimination or importance-based pruning should happen *inside* the cross-validation loop — not as a pre-processing step on the full dataset. Feature selection on the same data you train on inflates importance of noise features.
 
+
+
+---
+
+## Part 7: Advanced Sequence Modeling & Lifecycle Detection
+
+Advanced techniques that move beyond per-transaction features to capture the **shape and trajectory** of user behavior over time. These are Tier 2–4 signals — most powerful when stacked on top of Tier 1 (RFM/behavioral) features in an XGBoost ensemble.
+
+**Note:** Graph-based GNN approaches are excluded here. They require significant infrastructure (heterogeneous graph construction, GNN training, graph serving) and are better suited as a separate offline batch process. The techniques below are designed to integrate cleanly with the fit/transform API.
+
+---
+
+### 7.1 RFM and Fraud Extensions
+
+RFM (Recency, Frequency, Monetary) is the right starting point for the same reason it works in retail — it compresses complex transaction history into three numbers that capture the most important dimensions of behavior. The fraud signal isn't the RFM values themselves, but the **rate of change**.
+
+#### How RFM maps to each fraud type
+
+**Transaction monitoring (card-present / card-not-present):**
+The RFM baseline represents normal consumer spending. Fraud signal = deviation from that baseline.
+- Recency shift: suddenly transacting after a dormancy period → account takeover or credential resale
+- Frequency spike: burst of transactions in a short window → card testing or exploitation window
+- Monetary jump: first transaction above historical max → amount corridor breach
+
+The z-scores we build in behavioral profiling (`behav_amt_zscore`, `behav_hour_deviation`) are essentially tracking per-card RFM drift in real time.
+
+**Account Takeover (ATO):**
+The legitimate account owner has an established RFM profile built over months. The attacker's behavior creates a discontinuity in all three dimensions simultaneously.
+- `triple_novelty_score` = (fastest-ever inter-transaction interval) × (new recipient flag) × (max-ever amount) — directly captures simultaneous RFM regime change
+- A soft-day-1 ATO may probe with a low-amount test transaction (anomalous Recency, normal M), then escalate (anomalous Frequency + Monetary in hour 2)
+
+**Synthetic identity fraud (bust-out):**
+The fraudster deliberately builds a legitimate-looking RFM trajectory. Small purchases, on-time payments, gradual credit limit increases. The bust-out is the terminal event.
+- Raw RFM can't catch this — the account looks legitimate until it doesn't
+- RFM compared to **legitimate cluster centroids** can: the synthetic identity's trajectory is a little too smooth, too textbook, with suspiciously absent the noise and irregularity of real human behavior
+- Feature: `rfm_cluster_distance` = Euclidean distance from the card's RFM vector to the nearest legitimate cluster centroid (computed in fit() via K-means on fraud-negative training cards)
+
+**First-party fraud (friendly fraud / chargeback abuse):**
+Normal purchasing behavior punctuated by periodic disputes.
+- `dispute_frequency_ratio` = disputes_per_month / transactions_per_month
+- `disputed_amount_ratio` = mean disputed amount / mean non-disputed amount
+- `dispute_recency` = days since last dispute
+
+**Synthetic features to compute in fit():**
+```python
+# Per-card RFM vectors (stored in state for cluster distance computation)
+if card_col and amt_col and time_col:
+    last_time = df_train[time_col].max()
+    rfm = df_train.groupby(card_col).agg(
+        recency=(time_col, lambda x: float(last_time - x.max())),
+        frequency=(card_col, "count"),
+        monetary=(amt_col, "mean"),
+    ).reset_index()
+    
+    # K-means on fraud-negative cards to define "legitimate" clusters
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    
+    neg_rfm = rfm[rfm[card_col].isin(
+        df_train[y_train == 0][card_col].unique()
+    )][["recency", "frequency", "monetary"]].fillna(0)
+    
+    scaler = StandardScaler()
+    neg_scaled = scaler.fit_transform(neg_rfm)
+    
+    km = KMeans(n_clusters=8, random_state=42, n_init=10)
+    km.fit(neg_scaled)
+    
+    state["rfm_scaler_means"] = scaler.mean_.tolist()
+    state["rfm_scaler_stds"] = scaler.scale_.tolist()
+    state["rfm_centroids"] = km.cluster_centers_.tolist()
+    state["rfm_per_card"] = {
+        str(row[card_col]): {
+            "recency": float(row["recency"]),
+            "frequency": float(row["frequency"]),
+            "monetary": float(row["monetary"]),
+        }
+        for _, row in rfm.iterrows()
+    }
+```
+
+---
+
+### 7.2 HMM Fraud Lifecycle Modeling
+
+Hidden Markov Models are the most naturally suited framework for fraud lifecycle detection. The hidden states correspond to fraud lifecycle stages; the observable emissions are transaction features. This is Tier 2 in the architecture: sequence-level signal that point-in-time features miss.
+
+Research has shown that HMM-based features — specifically the likelihood of a transaction sequence given the learned model — significantly improve fraud detection by quantifying how "normal" or "fraudulent" the sequence looks as a whole.
+
+#### Hidden state design per fraud type
+
+**Account Takeover (4 states):**
+```
+legitimate_owner → credential_compromise → active_exploitation → cashout
+```
+- Observable signals: amount deviation, recipient novelty, device familiarity, time-of-day anomaly
+- Key pattern: the credential_compromise → active_exploitation transition often happens within 24 hours
+- `active_exploitation` state emits: high amount deviation, novel recipient, unfamiliar device, unusual hour
+
+**Synthetic Identity / Bust-out (4 states):**
+```
+identity_building → credit_nurturing → limit_testing → bust_out
+```
+- Observable signals: amount level, amount growth rate, frequency, time since account opening
+- Key pattern: legitimate customers' dwell time in each state is irregular. Synthetic identities are mechanically regular — driven by a playbook with suspiciously uniform state transitions.
+
+**Money Laundering / Mule Accounts (4 states):**
+```
+dormant → receiving → layering → extraction
+```
+- Observable signals: transaction direction (in vs. out), counterparty diversity, amount pattern
+- Key pattern: `receiving` state = high incoming from diverse senders; `extraction` = rapid outgoing to concentrated endpoints
+
+#### Practical implementation in the fit/transform API
+
+The HMM is trained in `fit()` and serialized as JSON-serializable numpy arrays. In `transform()`, it is reconstructed to compute posterior state probabilities per transaction.
+
+The **posterior state probability** for each transaction is the core feature: `P(state=exploitation | transaction sequence up to this point)`. These become columns in the feature matrix fed to XGBoost.
+
+**Critical detail:** HMMs are trained on **sequences**, not individual transactions. Group by card, sort by time, pass the sequence to hmmlearn. The per-transaction Viterbi-decoded state and posterior probabilities are joined back to the transaction DataFrame.
+
+```python
+# Fitting: requires hmmlearn (pip install hmmlearn)
+# Transforms that depend on sequence order: sort by [card_col, time_col] in both fit and transform
+```
+
+See **Recipe 8** in `recipes.md` for full fit/transform implementation.
+
+#### When to use HMMs
+
+| Fraud type | Benefit | When it helps |
+|---|---|---|
+| ATO | Detect exploitation state even before large transaction | After ≥3 transactions on the account |
+| Bust-out | Detect bust-out trajectory vs. legitimate maturation curve | Long account history (6+ months) |
+| Mule accounts | Detect receiving→layering→extraction transition | Accounts with recurring inbound/outbound patterns |
+| General CNP | Identify "unusual sequence" even if each transaction looks normal | Any card with 5+ transactions in train |
+
+**Limitation:** HMMs work best when cards have sufficient transaction history (≥5 in training). Cards with 1–2 transactions get noisy posterior estimates — clip features and use `hmm_n_obs` (count of training transactions) as a reliability indicator.
+
+---
+
+### 7.3 Feature-Group Autoencoder Anomaly Detection
+
+Train autoencoders on **specific feature groups** — not all features at once. Anomaly signal for "this device profile is unusual" and "this amount/time pattern is unusual" are different signals. Blending them into one autoencoder muddies the signal.
+
+**Feature group decomposition:**
+- **Amount group**: log_amt, amt_cents, amt_round_flag, amt_per_merchant_zscore, amt_per_category_zscore
+- **Time group**: hour_sin/cos, dow_sin/cos, is_night, time_since_last_txn
+- **Identity group** (IEEE-CIS): email match, device match, addr match, n_cards_per_device
+- **Behavioral group**: velocity features, behavioral z-scores from behavioral profiling
+
+**Why group-level autoencoders work:**
+A transaction where the amount is normal but the device pattern is highly anomalous has `ae_device_error = HIGH`, `ae_amount_error = LOW`. This is more informative than a single blended reconstruction error. XGBoost can learn "device error combined with new recipient = high fraud signal."
+
+**Implementation:** A 3-layer MLP autoencoder (input → bottleneck → input) with ReLU activations and a linear output layer. Trained in `fit()` on fraud-negative transactions. Weights stored as nested lists (JSON-serializable). Forward pass implemented in numpy in `transform()`.
+
+```python
+def _relu(x):
+    return np.maximum(0, x)
+
+def _ae_forward(X, coefs, intercepts):
+    """Forward pass: [input → hidden → bottleneck → hidden → output]."""
+    a = X
+    for i, (W, b) in enumerate(zip(coefs, intercepts)):
+        z = a @ np.array(W) + np.array(b)
+        a = _relu(z) if i < len(coefs) - 1 else z
+    return a
+```
+
+Reconstruction error = mean squared error between input and output. High error = anomalous.
+
+See **Recipe 9** in `recipes.md` for full per-feature-group implementation.
+
+**When to use:** Both datasets. Best when combined with HMM state features — an anomalous autoencoder score + an anomalous HMM state is a very strong combined signal.
+
+---
+
+### 7.4 Dynamic Time Warping (DTW) Trajectory Analysis
+
+DTW compares behavioral trajectories where the **shape** matters but the **timing** varies. In retail: "active → dormant → explosive" maps directly to bust-out fraud pattern matching.
+
+**Use cases:**
+
+**Bust-out fraud:** The trajectory is "small purchases → gradual increase → sudden massive spend → disappear." DTW can match this pattern even when the time axis varies — one fraudster executes in 6 months, another in 18. The shape is the signal, not the clock time.
+
+**Mule account recruitment:** Normal consumer behavior for months/years, then sudden activation with high incoming diversity + rapid outgoing to concentrated endpoints. DTW aligns this "before and after" shape across mules even when the inflection happens at different calendar dates.
+
+**Practical approach (without external DTW library):**
+Rather than full pairwise DTW, use a simplified approach:
+1. Compute each card's **amount trajectory** — rolling N-transaction window of log-amounts
+2. Compare the trajectory's shape (monotone increase? sudden jump? flat then spike?) via simple statistics:
+   - `traj_slope`: linear regression slope of log_amt over last N transactions
+   - `traj_variance`: variance of log_amt over last N transactions
+   - `traj_max_jump`: maximum single-step increase in log_amt
+   - `traj_bust_score`: `max(log_amt[-5:]) - mean(log_amt[:-5])` — did the end spike relative to the beginning?
+
+```python
+# In fit(): Per-card trajectory statistics computed on training data
+# Store: slope, variance, max_jump, bust_score per card
+# In transform(): Map each transaction to its card's trajectory stats
+# + add "how many standard deviations above the training trajectory slope is this card?"
+```
+
+For a full DTW-based implementation using `dtaidistance` (if available), compute pairwise distances to a set of **prototype fraud trajectories** extracted from confirmed fraud cases, and use the distance to the nearest fraud prototype as a feature.
+
+---
+
+### 7.5 CUSUM Behavioral Shift Detection
+
+CUSUM (Cumulative Sum) is a sequential change detection algorithm that flags when a process has shifted to a new regime. It's ideal for detecting behavioral shifts that accumulate gradually over multiple transactions.
+
+**How it works:** For each card, maintain a running cumulative sum of standardized deviations from the card's baseline. When the CUSUM exceeds a threshold (typically 5σ), a shift is detected.
+
+```
+CUSUM[t] = max(0, CUSUM[t-1] + (x[t] - μ) / σ - k)
+```
+
+where `k` is a slack parameter (typically 0.5) that prevents the CUSUM from accumulating on minor fluctuations.
+
+**Why this matters for fraud:**
+- A card that gradually increases amounts each transaction stays below per-transaction thresholds indefinitely
+- The CUSUM accumulates the "excess" over multiple transactions and fires when the total deviation is large
+- This is exactly the pattern of limit-testing in synthetic identity fraud and the early-stage escalation in ATO
+
+**Features generated:**
+- `cusum_score`: the current CUSUM value — how much accumulated deviation has occurred
+- `cusum_is_triggered`: binary flag when CUSUM exceeds 5σ threshold
+- `cusum_slope`: rate of change of CUSUM — how fast the deviation is accumulating
+- `cusum_reset_count`: number of times CUSUM has reset (reached 0 after a period of high values)
+
+See **Recipe 10** in `recipes.md` for the fit/transform implementation.
+
+---
+
+### 7.6 PU Learning and Adversarial Adaptation
+
+#### The label problem: Positive and Unlabeled (PU) learning
+
+Confirmed fraud labels are a **biased sample** — they represent fraudsters already caught. Undetected fraud looks like legitimate behavior in the training data. This is the PU (positive and unlabeled) learning problem:
+- Confirmed fraud = labeled positive
+- Everything else = unlabeled (may include uncaught fraud)
+
+**Practical implications:**
+1. Class weight tuning is critical — treating all non-fraud as negatives overfits to currently-detectable patterns
+2. Cluster analysis on the "legitimate" population may reveal small tight clusters with near-identical behavior — potential undetected fraud rings
+3. Semi-supervised approaches: propagate fraud signals through shared identity clusters (the entity resolution work in Part 5.3 already does this partially via `dest_is_mule_candidate`)
+4. Calibrate your AUPRC interpretation: if your model catches 60% of known fraud, it may still be missing a different 30% of total fraud that was never labeled
+
+**Agent implication:** When you find a cluster of high-confidence fraud predictions on "legitimate" accounts, that's a signal to examine — not a false positive rate problem. These may be true positives that slipped through the labeling process.
+
+#### Adversarial adaptation and concept drift
+
+Fraudsters probe the decision boundary and adapt. Your model's behavioral clusters drift not just from natural population changes but from active evasion.
+
+**Practical rules:**
+1. PSI monitoring (already built into the harness) catches **passive** population drift. Active adversarial adaptation appears as sudden PSI spikes on specific feature subsets.
+2. Feature-level PSI in `harness/feature_analysis.py` — run it periodically to find which features are drifting fastest.
+3. High-importance features that drift = evasion target. Low-importance features that drift = natural demographic shift.
+4. Any sequence model (HMM, autoencoder) needs a retraining cadence. For commodity fraud (CNP): weeks. For sophisticated synthetic identity rings: months (they can afford patience during the bust-out lifecycle).
+5. **Feature importance stability is a deployment signal**: if top features change dramatically between train and OOT without PSI spike, the model is learning unstable patterns.
+
+---
+
+### 7.7 Four-Tier Architecture Synthesis
+
+The full production architecture stacks tiers, with XGBoost consuming features from all of them.
+
+**Tier 1 — Fast features (per-transaction, real-time):**
+- RFM-based: behavioral z-scores, amount corridors, velocity counts
+- Identity stability: email/device/address match flags, entity sharing counts
+- Amount patterns: round numbers, cents distribution, corridor analysis
+- These run on every transaction. Catches obvious ATO with dramatic behavior changes, new accounts hitting high-value transactions.
+
+**Tier 2 — Sequence models (per-card, daily/weekly):**
+- HMM state posteriors: `P(active_exploitation | sequence)`, `P(bust_out | sequence)`
+- CUSUM behavioral shift scores
+- RFM cluster distances (fraud-negative centroid distances)
+- Run Viterbi decoding on each user's recent history. Catches trajectory patterns that point-in-time features miss.
+
+**Tier 3 — Anomaly detection (batch, nightly):**
+- Feature-group autoencoder reconstruction errors (amount group, time group, identity group)
+- Mahalanobis distance from training centroid (already in Recipe 6)
+- K-means cluster outlier scores (distance to nearest centroid)
+- This is the "unknown unknowns" detector — finds behavioral patterns that don't match any known archetype.
+
+**Tier 4 — Entity clustering (batch, nightly — graph-free):**
+- Union-Find entity resolution counts (shared device/email/address clusters from Part 5.3)
+- `device_distinct_users_30d`, `dest_is_mule_candidate`, `cross_entity_velocity`
+- Catches coordinated fraud and synthetic identity rings without requiring a GNN.
+- (Full GNN-based Tier 4 is a separate infrastructure project — not included here.)
+
+**XGBoost on top:** Consumes features from Tiers 1–4. Learns optimal combination — an anomalous Tier 3 score alone may be a false positive, but combined with a Tier 2 exploitation state and a Tier 4 shared-device cluster flag is almost certainly fraud.
+
+**Agent implication:** Start with Tier 1 (already in baseline). Add Tier 2 features (HMM, CUSUM) in subsequent iterations. Add Tier 3 (autoencoders) once Tier 1 has plateaued. Tier 4 entity resolution is already partially in Recipe 5 — extend with `cross_entity_velocity` patterns from Part 5.4.
+
+---
+
+### 7.8 Input Data Architecture: Multi-Source Joins
+
+The feature engineering framework is designed for raw transaction data joined to multiple vendor signals before features are engineered. The typical join pattern:
+
+```
+transactions (base)
+  LEFT JOIN device_signals ON device_fingerprint_id        -- battery, clock skew, session
+  LEFT JOIN ip_intelligence ON ip_address                   -- proxy score, ISP, geo
+  LEFT JOIN email_reputation ON email_domain                -- disposable, risky TLD, domain age
+  LEFT JOIN vendor_enrichment ON merchant_id                -- MCC category, merchant risk tier
+  LEFT JOIN historical_aggregates ON (card_id, window_key) -- pre-computed velocity counts
+```
+
+In the fit/transform API:
+- **fit()** sees this joined DataFrame and computes statistics over all available columns
+- **transform()** applies the fitted state — the joins should already be applied upstream in the data pipeline before the DataFrame arrives at fit()/transform()
+
+**Feature engineering at multiple aggregation states:**
+The 9×4 matrix from Part 5.4 applies to the joined data:
+- Per-card aggregations over joined device/IP signals (e.g., `card_distinct_device_fingerprints_7d`)
+- Per-merchant aggregations over joined email signals (e.g., `merchant_disposable_email_rate_30d`)
+- Per-IP aggregations over joined email signals (e.g., `ip_distinct_email_domains_1h`)
+
+The agent should add vendor/device/IP join-dependent features progressively, starting from whichever join columns are present in the dataset (check `config.dataset_profile` for `has_geo`, `has_identity`, `has_device`).
+

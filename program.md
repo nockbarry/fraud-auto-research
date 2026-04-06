@@ -104,6 +104,7 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 
 **Priority order** (by expected impact):
 
+**Phase 1 — Tabular features (high ROI, fast to implement):**
 1. **Velocity features** (Recipe 2) — per-card median gap, burst count, daily rate. Fraud has strong temporal patterns. Both datasets.
 2. **Behavioral profiling** (Recipe 3) — deviation-from-self: amount z-score vs user's own history, hour deviation. Both datasets.
 3. **OOF target encoding** (Recipe 1) — prevents within-train leakage. Use for all high-cardinality columns. Both datasets.
@@ -112,6 +113,14 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 6. **Anomaly score** (Recipe 6) — Mahalanobis distance from train centroid. Both datasets.
 7. **Amount patterns** (Recipe 7) — round numbers, corridor analysis. Both datasets.
 8. **Interaction TEs** — card x category, card x email, card x device. Use fitted TEs from Recipe 1.
+
+**Phase 2 — Sequence & trajectory features (add once Phase 1 plateaus):**
+9. **RFM cluster distance** (Recipe 11) — distance from card's RFM vector to legitimate cluster centroids. Detects bust-out trajectories. Requires sklearn KMeans (already available).
+10. **CUSUM behavioral shift** (Recipe 10) — sequential change detection on amount sequences. Catches gradual escalation. Both datasets.
+11. **HMM state features** (Recipe 8) — hidden Markov model posterior state probabilities. Requires `hmmlearn` (`pip install hmmlearn`). Most powerful for ATO and bust-out patterns.
+12. **Feature-group autoencoders** (Recipe 9) — reconstruction error per feature group (amount, time, identity). Catches anomalies with no single-feature signal. Both datasets.
+
+**Phase 2 reference:** See `fraud_practices.md` Part 7 for the conceptual framework behind each technique and which fraud types each targets. The four-tier architecture (Part 7.7) explains how these combine.
 
 **Per-dataset strategy:**
 - **IEEE-CIS** (3.5% fraud, identity-heavy): Focus on identity consistency, OOF TE, entity sharing. Use min_samples=50.
@@ -149,6 +158,8 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 ## Anti-Patterns
 
 - **DO NOT compute target statistics in transform()** — the harness won't give you labels there.
-- **DO NOT use non-serializable objects in state** — it must be a dict of strings, numbers, and nested dicts/lists.
+- **DO NOT use non-serializable objects in state** — it must be a dict of strings, numbers, and nested dicts/lists. Numpy arrays → `.tolist()`, sklearn objects → serialize their parameters manually.
 - **DO NOT one-hot encode high-cardinality features** — use target or frequency encoding.
 - **DO NOT ignore leakage warnings** — investigate and fix before proceeding.
+- **DO NOT use graph-based GNN features** — graph construction and GNN training require external infrastructure. Use entity resolution (Recipe 5) and cross-entity aggregations (fraud_practices.md Part 5.4) as graph-free alternatives.
+- **For HMM/autoencoder features**: wrap in `try/except` with `pass` so missing dependencies don't crash the harness. Check that card has ≥3 observations before HMM decoding — single-observation sequences produce unreliable posteriors.

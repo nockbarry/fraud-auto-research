@@ -379,3 +379,372 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     oot_preds = np.mean([m.predict_proba(X_oot)[:, 1] for m in models], axis=0)
     return {"y_val_pred": val_preds, "y_oot_pred": oot_preds, "model": models[0], ...}
 ```
+
+---
+
+## Recipe 8: HMM State Probability Features
+
+Per-card sequence features using a Hidden Markov Model. Captures lifecycle trajectory patterns that per-transaction features miss. Requires `hmmlearn` (`pip install hmmlearn`).
+
+```python
+# In fit():
+try:
+    from hmmlearn import hmm as hmmlib
+    import numpy as np
+
+    card_col = state.get("card_col")
+    amt_col = state.get("amt_col")
+    time_col = state.get("time_col")
+    N_STATES = 4  # e.g., normal / warm-up / escalation / bust-out
+
+    if card_col and amt_col and time_col:
+        df_s = df_train.sort_values([card_col, time_col]).copy()
+        df_s["_log_amt"] = np.log1p(df_s[amt_col].fillna(0))
+        df_s["_hour_n"] = (df_s[time_col] % 86400) / 86400.0
+        df_s["_dow_n"] = (df_s[time_col] // 86400 % 7) / 7.0
+
+        hmm_feat_cols = ["_log_amt", "_hour_n", "_dow_n"]
+
+        seqs, lengths = [], []
+        for _, grp in df_s.groupby(card_col, sort=False):
+            if len(grp) >= 3:
+                seqs.append(grp[hmm_feat_cols].values.astype(float))
+                lengths.append(len(grp))
+
+        if len(seqs) >= 10:
+            X = np.vstack(seqs)
+            model = hmmlib.GaussianHMM(
+                n_components=N_STATES, covariance_type="diag",
+                n_iter=50, random_state=42, verbose=False,
+            )
+            model.fit(X, lengths)
+
+            state["hmm_n_states"] = N_STATES
+            state["hmm_feat_cols"] = hmm_feat_cols
+            state["hmm_startprob"] = model.startprob_.tolist()
+            state["hmm_transmat"] = model.transmat_.tolist()
+            state["hmm_means"] = model.means_.tolist()
+            state["hmm_covars"] = model.covars_.tolist()
+except ImportError:
+    pass
+
+# In transform():
+if "hmm_n_states" in state:
+    try:
+        from hmmlearn import hmm as hmmlib
+        import numpy as np
+
+        card_col = state.get("card_col")
+        amt_col = state.get("amt_col")
+        time_col = state.get("time_col")
+        N_STATES = state["hmm_n_states"]
+        hmm_feat_cols = state["hmm_feat_cols"]
+
+        # Reconstruct model from serialized parameters
+        model = hmmlib.GaussianHMM(n_components=N_STATES, covariance_type="diag")
+        model.startprob_ = np.array(state["hmm_startprob"])
+        model.transmat_ = np.array(state["hmm_transmat"])
+        model.means_ = np.array(state["hmm_means"])
+        model.covars_ = np.array(state["hmm_covars"])
+        model.n_features = len(hmm_feat_cols)
+
+        df_s = df.sort_values([card_col, time_col]).copy()
+        df_s["_log_amt"] = np.log1p(df_s[amt_col].fillna(0))
+        df_s["_hour_n"] = (df_s[time_col] % 86400) / 86400.0
+        df_s["_dow_n"] = (df_s[time_col] // 86400 % 7) / 7.0
+
+        hmm_state_cols = [f"hmm_state_{i}_prob" for i in range(N_STATES)]
+        results = {}  # orig_idx -> state posteriors row
+
+        for _, grp in df_s.groupby(card_col, sort=False):
+            seq = grp[hmm_feat_cols].values.astype(float)
+            if len(grp) >= 2:
+                _, posteriors = model.score_samples(seq)
+            else:
+                posteriors = np.tile(model.startprob_, (len(grp), 1))
+            for i, orig_idx in enumerate(grp.index):
+                results[orig_idx] = posteriors[i]
+
+        prob_matrix = np.array([results.get(i, model.startprob_) for i in df.index])
+        for s in range(N_STATES):
+            df[f"hmm_state_{s}_prob"] = prob_matrix[:, s]
+        df["hmm_most_likely_state"] = np.argmax(prob_matrix, axis=1).astype(float)
+        df["hmm_state_entropy"] = -np.sum(
+            np.where(prob_matrix > 0, prob_matrix * np.log(prob_matrix + 1e-10), 0), axis=1
+        )
+    except Exception:
+        pass
+```
+
+**When to use**: ATO detection, bust-out trajectory detection, any dataset with card + timestamp + amount. Needs ≥5 transactions per card for reliable posteriors. Add `hmm_n_obs` from `behav_txn_count` (Recipe 3) as a reliability weight.
+
+---
+
+## Recipe 9: Feature-Group Autoencoder Reconstruction Error
+
+Train per-group autoencoders (amount group, time group, identity group) on fraud-negative training transactions. High reconstruction error = anomalous for that feature group. Weights serialized as nested lists (JSON-serializable).
+
+```python
+# Helper — add outside fit/transform (top of features file):
+import numpy as np
+
+def _relu(x):
+    return np.maximum(0, x)
+
+def _ae_forward(X_np, coefs_list, biases_list):
+    """Forward pass: ReLU activations, linear output layer."""
+    a = X_np.astype(float)
+    for i, (W, b) in enumerate(zip(coefs_list, biases_list)):
+        z = a @ np.array(W) + np.array(b)
+        a = _relu(z) if i < len(coefs_list) - 1 else z
+    return a
+
+def _train_ae(X_np, bottleneck=4, n_iter=30, lr=0.01, random_state=42):
+    """Minimal MLP autoencoder: input -> hidden -> bottleneck -> hidden -> input."""
+    rng = np.random.RandomState(random_state)
+    n_feat = X_np.shape[1]
+    n_hidden = max(n_feat // 2, bottleneck + 1)
+
+    W1 = rng.randn(n_feat, n_hidden) * 0.1;     b1 = np.zeros(n_hidden)
+    W2 = rng.randn(n_hidden, bottleneck) * 0.1;  b2 = np.zeros(bottleneck)
+    W3 = rng.randn(bottleneck, n_hidden) * 0.1;  b3 = np.zeros(n_hidden)
+    W4 = rng.randn(n_hidden, n_feat) * 0.1;      b4 = np.zeros(n_feat)
+
+    for _ in range(n_iter):
+        # Forward
+        h1 = _relu(X_np @ W1 + b1)
+        h2 = _relu(h1 @ W2 + b2)
+        h3 = _relu(h2 @ W3 + b3)
+        out = h3 @ W4 + b4
+        err = out - X_np
+        # Backward (MSE gradient, simplified)
+        dout = 2 * err / len(X_np)
+        dW4 = h3.T @ dout;       db4 = dout.mean(axis=0)
+        dh3 = dout @ W4.T * (h3 > 0)
+        dW3 = h2.T @ dh3;        db3 = dh3.mean(axis=0)
+        dh2 = dh3 @ W3.T * (h2 > 0)
+        dW2 = h1.T @ dh2;        db2 = dh2.mean(axis=0)
+        dh1 = dh2 @ W2.T * (h1 > 0)
+        dW1 = X_np.T @ dh1;      db1 = dh1.mean(axis=0)
+        # Update
+        for W, dW in [(W1,dW1),(W2,dW2),(W3,dW3),(W4,dW4)]:
+            W -= lr * dW
+        for b, db in [(b1,db1),(b2,db2),(b3,db3),(b4,db4)]:
+            b -= lr * db
+
+    coefs = [W1.tolist(), W2.tolist(), W3.tolist(), W4.tolist()]
+    biases = [b1.tolist(), b2.tolist(), b3.tolist(), b4.tolist()]
+    return coefs, biases
+
+
+# In fit():
+amt_col = state.get("amt_col")
+time_col = state.get("time_col")
+
+# Define feature groups (adjust column names to your dataset)
+ae_groups = {}
+if amt_col and amt_col in df_train.columns:
+    ae_groups["amount"] = [c for c in [
+        amt_col, f"{amt_col}_log" if f"{amt_col}_log" not in df_train.columns else None,
+        "amt_cents", "amt_is_round_10",
+    ] if c and c in df_train.columns]
+if time_col and time_col in df_train.columns:
+    ae_groups["time"] = [c for c in [
+        "hour_of_day", "day_of_week", "is_night",
+    ] if c in df_train.columns]
+
+state["ae_groups"] = {}
+for group_name, cols in ae_groups.items():
+    if len(cols) < 2:
+        continue
+    neg_mask = (y_train == 0)
+    X_raw = df_train.loc[neg_mask, cols].fillna(0).values.astype(float)
+    if len(X_raw) < 100:
+        continue
+    # Standardize
+    col_mean = X_raw.mean(axis=0).tolist()
+    col_std = np.maximum(X_raw.std(axis=0), 0.001).tolist()
+    X_scaled = (X_raw - np.array(col_mean)) / np.array(col_std)
+    # Train
+    coefs, biases = _train_ae(X_scaled, bottleneck=max(2, len(cols)//3))
+    state["ae_groups"][group_name] = {
+        "cols": cols,
+        "mean": col_mean,
+        "std": col_std,
+        "coefs": coefs,
+        "biases": biases,
+    }
+
+# In transform():
+for group_name, ae_state in state.get("ae_groups", {}).items():
+    cols = ae_state["cols"]
+    available = [c for c in cols if c in df.columns]
+    if len(available) < 2:
+        continue
+    X_raw = df[available].fillna(0).values.astype(float)
+    mean_ = np.array(ae_state["mean"][:len(available)])
+    std_ = np.array(ae_state["std"][:len(available)])
+    X_scaled = (X_raw - mean_) / std_
+    X_recon = _ae_forward(X_scaled, ae_state["coefs"], ae_state["biases"])
+    recon_err = np.mean((X_scaled - X_recon) ** 2, axis=1)
+    df[f"ae_{group_name}_recon_error"] = recon_err
+    df[f"ae_{group_name}_recon_log"] = np.log1p(recon_err)
+    df[f"ae_{group_name}_max_feat_err"] = np.max((X_scaled - X_recon) ** 2, axis=1)
+```
+
+**When to use**: Both datasets. Best added after behavioral profiling has plateaued — the autoencoder catches anomalies that don't map to a specific known feature pattern. Train on fraud-negative rows only (in fit()) so the AE learns "normal" and flags fraud as high-error.
+
+---
+
+## Recipe 10: CUSUM Behavioral Shift Detection
+
+Sequential change detection — accumulates evidence that a behavioral shift has occurred. Catches gradual escalation that per-transaction thresholds miss.
+
+```python
+# In fit():
+card_col = state.get("card_col")
+amt_col = state.get("amt_col")
+time_col = state.get("time_col")
+
+if card_col and amt_col and time_col:
+    df_s = df_train.sort_values([card_col, time_col])
+    # Per-card baseline: mean and std from first half of transactions
+    baselines = {}
+    for card, grp in df_s.groupby(card_col, sort=False):
+        n_base = max(2, len(grp) // 2)
+        baseline_grp = grp.head(n_base)
+        mu = float(baseline_grp[amt_col].mean())
+        sigma = float(baseline_grp[amt_col].std()) if len(baseline_grp) > 1 else 1.0
+        baselines[str(card)] = {
+            "mu": mu,
+            "sigma": max(sigma, 0.01 * abs(mu) + 1.0),
+            "n": int(len(grp)),
+        }
+    state["cusum_baselines"] = baselines
+    state["cusum_k"] = 0.5  # slack: ignore deviations < 0.5σ
+
+# In transform():
+if "cusum_baselines" in state:
+    card_col = state.get("card_col")
+    amt_col = state.get("amt_col")
+    time_col = state.get("time_col")
+    k = state.get("cusum_k", 0.5)
+
+    if card_col in df.columns and amt_col in df.columns and time_col in df.columns:
+        df_s = df.sort_values([card_col, time_col]).copy()
+
+        cusum_score = np.zeros(len(df_s))
+        cusum_slope = np.zeros(len(df_s))
+
+        pos_map = {orig_idx: pos for pos, orig_idx in enumerate(df_s.index)}
+
+        for card, grp in df_s.groupby(card_col, sort=False):
+            baseline = state["cusum_baselines"].get(str(card))
+            if baseline is None:
+                continue
+            mu = baseline["mu"]
+            sigma = baseline["sigma"]
+            amounts = grp[amt_col].fillna(mu).values
+
+            cusum = np.zeros(len(grp))
+            for i in range(len(grp)):
+                z = (amounts[i] - mu) / sigma
+                prev = cusum[i - 1] if i > 0 else 0.0
+                cusum[i] = max(0.0, prev + z - k)
+            
+            slope = np.diff(cusum, prepend=cusum[0])
+
+            for i, orig_idx in enumerate(grp.index):
+                p = pos_map[orig_idx]
+                cusum_score[p] = cusum[i]
+                cusum_slope[p] = slope[i]
+
+        df_s["cusum_score"] = cusum_score
+        df_s["cusum_slope"] = cusum_slope
+        df_s["cusum_triggered"] = (cusum_score > 5.0).astype(float)
+
+        for col in ["cusum_score", "cusum_slope", "cusum_triggered"]:
+            df[col] = df_s[col].reindex(df.index).fillna(0)
+```
+
+**When to use**: ATO escalation detection, synthetic identity limit-testing. Works best with amount column but can be applied to any numeric feature (e.g., `velocity_daily_rate`, `behav_hour_deviation`). The threshold of 5.0 is standard for CUSUM — tune as a hyperparameter.
+
+---
+
+## Recipe 11: RFM Cluster Distance Features
+
+Compute each card's RFM vector and measure distance to K-means centroids fitted on fraud-negative training cards. Cards whose RFM sits far from any legitimate cluster centroid are suspicious.
+
+```python
+# In fit():
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+card_col = state.get("card_col")
+amt_col = state.get("amt_col")
+time_col = state.get("time_col")
+
+if card_col and amt_col and time_col:
+    last_time = float(df_train[time_col].max())
+
+    rfm_df = df_train.groupby(card_col).agg(
+        recency=(time_col, lambda x: last_time - float(x.max())),
+        frequency=(time_col, "count"),
+        monetary=(amt_col, "mean"),
+    ).reset_index()
+
+    # Fit only on fraud-negative cards
+    neg_cards = df_train.loc[y_train == 0, card_col].unique()
+    neg_rfm = rfm_df[rfm_df[card_col].isin(neg_cards)][["recency","frequency","monetary"]].fillna(0)
+
+    if len(neg_rfm) >= 16:
+        sc = StandardScaler()
+        neg_scaled = sc.fit_transform(neg_rfm.values)
+        n_clusters = min(8, len(neg_rfm) // 2)
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        km.fit(neg_scaled)
+
+        state["rfm_sc_mean"] = sc.mean_.tolist()
+        state["rfm_sc_std"] = sc.scale_.tolist()
+        state["rfm_centroids"] = km.cluster_centers_.tolist()
+
+        # Store per-card RFM (recency, freq, monetary) for transform lookup
+        state["rfm_per_card"] = {
+            str(row[card_col]): [
+                float(row["recency"]), float(row["frequency"]), float(row["monetary"])
+            ]
+            for _, row in rfm_df.iterrows()
+        }
+        state["rfm_global"] = [
+            float(rfm_df["recency"].median()),
+            float(rfm_df["frequency"].median()),
+            float(rfm_df["monetary"].median()),
+        ]
+
+# In transform():
+if "rfm_centroids" in state:
+    import numpy as np
+    card_col = state.get("card_col")
+    if card_col and card_col in df.columns:
+        centroids = np.array(state["rfm_centroids"])
+        sc_mean = np.array(state["rfm_sc_mean"])
+        sc_std = np.array(state["rfm_sc_std"])
+        global_rfm = np.array(state["rfm_global"])
+
+        rfm_lookup = state["rfm_per_card"]
+
+        card_strs = df[card_col].astype(str)
+        rfm_vectors = np.array([
+            rfm_lookup.get(c, global_rfm.tolist()) for c in card_strs
+        ], dtype=float)
+        rfm_scaled = (rfm_vectors - sc_mean) / np.maximum(sc_std, 1e-6)
+
+        # Distance to nearest legitimate centroid
+        dists = np.linalg.norm(rfm_scaled[:, np.newaxis, :] - centroids[np.newaxis, :, :], axis=2)
+        df["rfm_nearest_cluster_dist"] = dists.min(axis=1)
+        df["rfm_assigned_cluster"] = dists.argmin(axis=1).astype(float)
+        df["rfm_min_cluster_dist_log"] = np.log1p(df["rfm_nearest_cluster_dist"])
+```
+
+**When to use**: Bust-out detection, synthetic identity profiling. Most powerful when the dataset has long enough card history to build stable RFM vectors. Use `behav_txn_count` as a confidence mask — don't trust RFM for cards with <5 transactions.
+
