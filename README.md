@@ -4,11 +4,34 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 ---
 
+## What This Is Built For
+
+The framework is designed for **production-grade fraud feature engineering** on enriched transaction data — raw transactions pre-joined to any combination of:
+
+- **Vendor / merchant data** — MCC codes, merchant risk tier, merchant velocity
+- **Device signals** — fingerprint IDs, battery state, clock skew, session behavior, emulator flags
+- **IP intelligence** — proxy scores, ISP, geolocation, IP velocity, IP-to-email diversity
+- **Email reputation** — domain classification (freemail/disposable/risky TLD), local-part entropy, name coherence
+- **Historical aggregates** — pre-computed velocity counts over 1h / 6h / 24h / 7d / 30d windows
+
+The agent engineers features **at multiple aggregation levels**: per-transaction signals, per-entity behavioral profiles (amount z-scores, time-of-day patterns, inter-transaction gaps), cross-entity diversity metrics (distinct devices per IP, distinct emails per card), and corridor features (amount vs. merchant/category/geo baseline). All of this is iterated over a fixed evaluation harness that scores every change on a held-out OOT split.
+
+**The agent's knowledge bank** (`fraud_practices.md`, `recipes.md`) covers:
+- Six fraud types: CNP, ATO, first-party, synthetic identity, account opening, money laundering
+- Tabular features: velocity, behavioral profiling, identity stability, entity resolution, amount corridors
+- Sequence features: HMM lifecycle state probabilities, CUSUM behavioral shift detection, RFM cluster distance
+- Anomaly features: per-feature-group autoencoder reconstruction error, Mahalanobis distance
+- Modeling: focal loss, rank-average ensembles, bootstrapped CIs, XGBoost hyperparameter guide
+
+The harness is domain-agnostic. Adapting to a new fraud problem means updating the config and baseline feature/model files — the evaluation infrastructure never changes.
+
+---
+
 ## Two-Phase Design
 
 This system separates **setup** (done once by a human) from **iteration** (done autonomously by the agent):
 
-### Phase 1 — Human Setup (done once per problem)
+### Phase 1 — Setup (done once per problem)
 
 The operator adapts the system to a specific fraud problem:
 
@@ -191,11 +214,35 @@ Baseline AUPRC 0.499. Strong starting point — behavioral amount deviation feat
 
 ## Adapting to a New Dataset
 
+### Input Data Model
+
+The parquet files handed to the agent should be **fully-joined, transaction-level DataFrames** — raw transaction columns plus any enrichment you want the agent to work with:
+
+```
+raw_train.parquet / raw_val.parquet / raw_oot.parquet
+│
+├── Core transaction cols    — amount, timestamp, product/category
+├── Card / account cols      — card ID, account age, card type, issuer
+├── Address cols             — billing addr, shipping addr, match flags
+├── Device cols (optional)   — fingerprint ID, device type, OS, browser,
+│                              battery_level, clock_skew_ms, session_duration
+├── IP cols (optional)       — ip_address, ip_proxy_score, ip_isp, ip_country
+├── Email cols (optional)    — email domain, email local part, domain age
+├── Vendor cols (optional)   — merchant ID, MCC, merchant_risk_tier
+├── Pre-computed aggregates  — card_txn_count_7d, card_amt_sum_24h, etc.
+│                              (optional; agent can also engineer these itself)
+└── label                    — 0/1 fraud indicator
+```
+
+The agent's `fit()` function sees the full joined DataFrame and decides which columns to use. Columns the agent doesn't use are simply ignored. The `dataset_profile` in the config tells the agent what's available (`has_geo`, `has_identity`, `has_device`), so it selects appropriate recipe patterns without guessing.
+
+**Pre-computed aggregates are optional but valuable.** If your data pipeline already produces velocity counts (transactions in the last 24h per card), pass them through — the agent will use them directly and can build on top of them with ratio and z-score features. If not, the agent will engineer them itself from the raw timestamp + entity ID columns using the fit/transform API.
+
 ### 1. Prepare data
 
 ```
 data/my-dataset/
-├── raw_train.parquet   # label col = 0/1
+├── raw_train.parquet   # label col = 0/1, all joined enrichment columns included
 ├── raw_val.parquet
 └── raw_oot.parquet
 ```
@@ -226,11 +273,18 @@ dataset_profile:
   fraud_rate: 0.01
   n_rows: 500000
   n_raw_features: 30
-  has_geo: false
-  has_identity: true
-  population_shift: low
-  key_entity_col: "card_id"
-  # ... guide the agent's strategy
+  # Tell the agent what enrichment columns are present:
+  has_geo: false            # lat/lon or geo region columns
+  has_identity: true        # email, device, address match flags
+  has_device: true          # device fingerprint, OS, browser, session signals
+  has_ip: false             # IP address or IP-derived signals
+  has_email: true           # email domain/local-part columns
+  has_vendor: false         # merchant/MCC/vendor enrichment
+  has_precomputed_aggs: false  # pre-built velocity counts from upstream pipeline
+  population_shift: low     # low / medium / high — tunes PSI penalty weight
+  key_entity_col: "card_id" # primary entity for behavioral profiling
+  fraud_type: "cnp"         # cnp / ato / first_party / synthetic_id / ao / aml
+  # Agent uses these flags to select relevant recipes and fraud_practices.md sections
 ```
 
 ### 3. Write baseline files
@@ -309,12 +363,15 @@ The harness is domain-agnostic — only the config, feature files, model files, 
 
 | What to change | What stays the same |
 |----------------|---------------------|
-| `configs/*.yaml` — data paths, metric weights, domain profile | `harness/evaluate.py` — pipeline orchestration |
+| `configs/*.yaml` — data paths, metric weights, domain profile, enrichment flags | `harness/evaluate.py` — pipeline orchestration |
 | `features_*.py` — domain-specific transforms | `harness/experiment_tracker.py` — tracking |
 | `model_*.py` — algorithm choices | `harness/context.py` — agent memory |
 | `recipes.md` — domain feature patterns | `harness/dashboard.py` — dashboard |
 | `program.md` — agent strategy guidance | `harness/data_loader.py`, `validate_features.py`, etc. |
 | `fraud_practices.md` → `domain_practices.md` | All metric computation |
+| Input data joins (upstream, before parquet files) | Fit/transform API contract |
+
+**What the harness never needs to know about:** how the parquet files were produced. The upstream join of transactions to vendor/device/IP/email enrichment is done outside the harness — in your ETL, dbt, or Spark pipeline. Once the data lands as a flat parquet file, the agent takes over. This means you can iterate on enrichment sources independently from the agent loop: add a new vendor signal column to the parquet files and the agent will discover and use it in the next run.
 
 The composite score formula is fully configurable via YAML weights. If you need a different primary metric (e.g., log loss, Gini, custom threshold metric), modify `evaluate.py` — it's the one harness file designed to be customized for new domains.
 
