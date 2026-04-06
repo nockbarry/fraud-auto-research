@@ -1,0 +1,94 @@
+# Fraud Detection Handbook — Simulated Transaction Data
+# Source: https://github.com/Fraud-Detection-Handbook/simulated-data-raw
+# Companion book: https://fraud-detection-handbook.github.io/fraud-detection-handbook/
+dataset_name: "fdh"
+features_file: "features_fdh.py"
+model_file: "model_fdh.py"
+dataset_description: "FDH simulated card transactions, 1.75M txns, 4990 customers, 10000 terminals, 3 fraud scenarios, 0.84% fraud rate"
+
+local_data:
+  enabled: true
+  data_dir: "./data/fdh"
+  prefix: "raw"
+
+bigquery:
+  project: ""
+  dataset: ""
+  source_table: ""
+  cache_dir: "./data_cache"
+  max_rows: 5000000
+
+segment:
+  name: "all_transactions"
+  filter_sql: "1=1"
+
+fraud_type:
+  name: "all"
+  label_column: "label"
+
+dates:
+  train_start: "2018-04-01"
+  train_end: "2018-07-31"
+  val_start: "2018-08-01"
+  val_end: "2018-08-31"
+  oot_start: "2018-09-01"
+  oot_end: "2018-09-30"
+
+metrics:
+  target_recall: 0.80
+  composite_weights:
+    auprc: 0.50
+    precision_at_recall: 0.30
+    psi_penalty: 0.20
+  psi_threshold: 0.20
+  psi_hard_reject: 0.25
+  min_improvement: 0.001
+
+validation:
+  max_nan_rate: 0.10
+  max_feature_explosion: 5.0
+  max_feature_count: 300
+  max_correlation: 0.98
+
+execution:
+  timeout_seconds: 900
+
+# Dataset profile — agent reads this to adapt strategy
+dataset_profile:
+  fraud_rate: 0.0084
+  n_rows: 1754155
+  n_raw_features: 6
+  has_geo: false
+  has_identity: true            # CUSTOMER_ID, TERMINAL_ID are key entity columns
+  has_temporal: true            # TX_DATETIME is a full timestamp
+  has_email: false
+  has_demographics: false
+  population_shift: low         # fraud rate stable across splits (~0.81-0.90%)
+  key_entity_col: "CUSTOMER_ID"
+  time_col: "TX_DATETIME"
+  amt_col: "TX_AMOUNT"
+  # THREE FRAUD SCENARIOS (not exposed in data — agent must discover patterns):
+  # Scenario 1 (973 cases): high-amount transactions — amount > customer's typical range
+  # Scenario 2 (9077 cases): terminal compromise — specific terminals fraudulent for 28 days
+  # Scenario 3 (4631 cases): card-not-present — small amounts repeated across many terminals
+  # KEY INSIGHT: all signal must be engineered — only 6 raw columns
+  # Rich feature engineering opportunities:
+  #   - Customer velocity: tx count in 1h/6h/24h/7d, amount stats over windows
+  #   - Terminal risk: fraud rate per terminal over rolling window
+  #   - Customer behavioral deviation: amount vs personal history mean/std
+  #   - Time features: hour of day, day of week, weekend flag
+  #   - Amount patterns: round numbers, small repeated amounts
+  #   - Customer-terminal interaction: first time at this terminal?
+  raw_columns:
+    - TRANSACTION_ID   # integer, monotonically increasing
+    - TX_DATETIME      # full timestamp, 2018-04-01 to 2018-09-30
+    - CUSTOMER_ID      # string ID, 4990 unique customers
+    - TERMINAL_ID      # string ID, 10000 unique terminals
+    - TX_AMOUNT        # float, transaction amount (no currency specified)
+    - TX_TIME_SECONDS  # seconds since dataset start (derived, available)
+    - TX_TIME_DAYS     # days since dataset start (derived, available)
+    - label            # 0/1 fraud label (renamed from TX_FRAUD)
+    # TX_FRAUD_SCENARIO DROPPED — reveals fraud type (leaky)
+  recommended_te_smoothing:
+    min_samples: 20
+    smoothing_width: 10

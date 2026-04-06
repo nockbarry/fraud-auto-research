@@ -98,6 +98,27 @@ The `sota` symlink always points to the current best. Use `--save` flag to auto-
 - 0.5% fraud rate, 42% population shift in OOT
 - Current SOTA AUPRC: ~0.543
 
+### FDH (configs/fdh.yaml) — features_fdh.py / model_fdh.py
+- Fraud Detection Handbook simulated transactions, 1.75M rows
+- 6 raw columns: TRANSACTION_ID, TX_DATETIME, CUSTOMER_ID, TERMINAL_ID, TX_AMOUNT, label
+- 0.84% fraud rate, 4990 customers, 10000 terminals, stable fraud rate across splits
+- THREE FRAUD SCENARIOS (not labeled — must engineer features to capture each):
+  1. High-amount: fraud amount >> customer's typical range → behavioral deviation features
+  2. Terminal compromise: specific terminals fraudulent for 28-day windows → terminal risk/velocity
+  3. Card-not-present: small repeated amounts across many terminals → velocity + amount pattern features
+- Baseline AUPRC: 0.248 (strong engineering needed to reach 0.65+)
+- term_fraud_rate dominates baseline — next priority: velocity (rolling window counts/sums)
+
+### PaySim (configs/paysim.yaml) — features_paysim.py / model_paysim.py
+- PaySim synthetic mobile money transactions, 6.3M rows, 1-month simulation
+- 9 raw columns: step (hour), type, amount, origin/dest balances, entity IDs
+- 0.13% overall fraud rate — fraud ONLY in TRANSFER (0.77%) and CASH_OUT (0.18%) types
+- Temporal split: steps 1-500 train, 501-600 val, 601-743 OOT
+- Near-perfect baseline AUPRC (~1.0) — key signal: balance error feature
+- Agent should focus on: reducing feature count, improving PSI robustness, latency optimization, exploring temporal sequence patterns
+- CRITICAL: `isFlaggedFraud` is NOT in the data (was dropped — it is leaky). Do not reference it.
+- Key fraud pattern: TRANSFER to new account → CASH_OUT. Balance drain (orig goes to 0). Balance error = |(old - new) - amount| ≈ 0 for legit, large for fraud.
+
 ## Feature Engineering Strategy
 
 Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SOTA techniques by fraud type. Read `dataset_profile` in the config for dataset characteristics.
@@ -125,6 +146,8 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 **Per-dataset strategy:**
 - **IEEE-CIS** (3.5% fraud, identity-heavy): Focus on identity consistency, OOF TE, entity sharing. Use min_samples=50.
 - **Fraud-Sim** (0.5% fraud, geo-heavy, high population shift): Focus on velocity, behavioral profiling, geo features. Use min_samples=20. Don't over-smooth.
+- **PaySim** (0.13% fraud, mobile money, near-perfect baseline): Balance error already near-perfect. Focus on: (1) velocity/sequence features on nameOrig/nameDest entity pairs — TRANSFER→CASH_OUT chain detection; (2) feature compression — maintain AUPRC with fewer features; (3) model latency; (4) robustness without balance features (try model that excludes balance columns as ablation). Use type-conditional features extensively.
+- **FDH** (0.84% fraud, 6 raw columns, hard — needs engineering): Baseline AUPRC=0.248. Priority order: (1) velocity features — rolling 1h/6h/24h/7d counts and sums per CUSTOMER_ID and TERMINAL_ID (captures scenario 3: repeated small txns); (2) terminal compromise signal — rolling fraud rate per terminal over recent window (captures scenario 2); (3) behavioral deviation — amount z-score vs customer's own history (captures scenario 1); (4) customer-terminal novelty — is this customer's first visit to this terminal? Time since last transaction. Use TX_TIME_DAYS or TX_DATETIME for window computations. Expected ceiling AUPRC ~0.80 with good velocity features.
 
 **Anti-leakage rules:**
 - All target-dependent stats MUST be computed in `fit()`, stored in `state`

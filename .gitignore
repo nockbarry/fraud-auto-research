@@ -8,8 +8,9 @@ run.log
 run_*.log
 validate.log
 analysis.log
-reports/dashboard.html
-reports/plot_*.png
+# reports tracked — do not ignore
+# reports/dashboard.html
+# reports/plot_*.png
 __pycache__/
 *.pyc
 .env

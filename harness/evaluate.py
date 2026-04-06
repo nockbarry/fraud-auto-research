@@ -209,6 +209,9 @@ def run_evaluation(config: dict | None = None) -> dict:
     for w in state_warnings:
         print(f"  {w}")
 
+    # Capture a raw row for latency measurement BEFORE transformation
+    raw_single_row = df_train.head(1).copy()
+
     # Step 4: Transform all splits WITHOUT labels
     print("Step 4: Transforming features (no labels)...")
     df_train = features_mod.transform(df_train, fit_state, config)
@@ -235,9 +238,8 @@ def run_evaluation(config: dict | None = None) -> dict:
     for w in leakage_warnings:
         print(f"  {w}")
 
-    # Step 5c: Scoring latency
-    single_row = df_train.drop(columns=["label"]).head(1)
-    latency_ms = _measure_transform_latency(features_mod.transform, single_row, fit_state, config)
+    # Step 5c: Scoring latency — use raw (pre-transform) row
+    latency_ms = _measure_transform_latency(features_mod.transform, raw_single_row, fit_state, config)
     print(f"  Single-row transform latency: {latency_ms:.1f}ms")
 
     # Step 6: Prepare features and train

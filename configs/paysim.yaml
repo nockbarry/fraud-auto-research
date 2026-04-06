@@ -1,0 +1,92 @@
+# PaySim Mobile Money Fraud — synthetic mobile money transaction data
+dataset_name: "paysim"
+features_file: "features_paysim.py"
+model_file: "model_paysim.py"
+dataset_description: "PaySim synthetic mobile money transactions, 6.3M txns, fraud only in TRANSFER/CASH_OUT types, 0.13% fraud rate"
+
+local_data:
+  enabled: true
+  data_dir: "./data/paysim"
+  prefix: "raw"
+
+bigquery:
+  project: ""
+  dataset: ""
+  source_table: ""
+  cache_dir: "./data_cache"
+  max_rows: 10000000
+
+segment:
+  name: "all_transactions"
+  filter_sql: "1=1"
+
+fraud_type:
+  name: "all"
+  label_column: "label"
+
+dates:
+  train_start: "2024-01-01"
+  train_end: "2024-09-30"
+  val_start: "2024-10-01"
+  val_end: "2024-11-30"
+  oot_start: "2024-12-01"
+  oot_end: "2025-01-31"
+
+metrics:
+  target_recall: 0.80
+  composite_weights:
+    auprc: 0.50
+    precision_at_recall: 0.30
+    psi_penalty: 0.20
+  psi_threshold: 0.20
+  psi_hard_reject: 0.25
+  min_improvement: 0.001
+
+validation:
+  max_nan_rate: 0.10
+  max_feature_explosion: 5.0
+  max_feature_count: 300
+  max_correlation: 0.98
+
+execution:
+  timeout_seconds: 1200
+
+# Dataset profile — agent reads this to adapt strategy
+dataset_profile:
+  fraud_rate: 0.0013
+  n_rows: 6362620
+  n_raw_features: 9
+  has_geo: false
+  has_identity: true             # nameOrig, nameDest entity IDs
+  has_temporal: true             # step (hour 1-744, represents 1 month)
+  has_email: false
+  has_demographics: false
+  population_shift: medium
+  key_entity_col: "nameOrig"
+  time_col: "step"
+  amt_col: "amount"
+  # CRITICAL: fraud only occurs in TRANSFER and CASH_OUT transaction types
+  # isFlaggedFraud is a LEAKY rule-based flag — NEVER USE as a feature
+  # Key fraud signal: balance error = abs((oldbalanceOrg - newbalanceOrig) - amount)
+  # Fraud pattern: TRANSFER to account followed by CASH_OUT
+  transaction_types:
+    - CASH_IN       # no fraud
+    - CASH_OUT      # ~21% fraud rate within type
+    - DEBIT         # no fraud
+    - PAYMENT       # no fraud
+    - TRANSFER      # ~0.76% fraud rate within type
+  raw_columns:
+    - step           # simulation step (1 hour), 1-744 total
+    - type           # transaction type
+    - amount         # transaction amount
+    - nameOrig       # origin account ID
+    - oldbalanceOrg  # origin balance before transaction
+    - newbalanceOrig # origin balance after transaction
+    - nameDest       # destination account ID
+    - oldbalanceDest # destination balance before
+    - newbalanceDest # destination balance after
+    - label          # 0/1 fraud label (renamed from isFraud)
+    # isFlaggedFraud DROPPED — leaky rule-based flag
+  recommended_te_smoothing:
+    min_samples: 10
+    smoothing_width: 5

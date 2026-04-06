@@ -204,12 +204,16 @@ def generate_dashboard_html(data: dict) -> str:
     total_keep = sum(d["kept"] for d in datasets.values())
     best_auprc = max((d.get("best_auprc_oot", d.get("best_auprc", 0)) for d in datasets.values()), default=0)
 
+    nav_links = " &nbsp;|&nbsp; ".join(
+        f'<a href="#{name}" class="nav-link">{name}</a>' for name in datasets
+    )
     cards_html = f"""
         <div class="card blue"><div class="label">Datasets</div><div class="value">{len(datasets)}</div></div>
         <div class="card purple"><div class="label">Experiments</div><div class="value">{total_exp}</div></div>
         <div class="card green"><div class="label">Kept</div><div class="value">{total_keep}</div></div>
-        <div class="card amber"><div class="label">Best AUPRC (OOT)</div><div class="value">{best_auprc:.4f}</div></div>
+        <div class="card amber"><div class="label">Discarded</div><div class="value">{total_exp - total_keep}</div></div>
     """
+    nav_html = f'<div class="nav-bar">{nav_links}</div>' if nav_links else ""
 
     datasets_html = ""
     for name, ds in datasets.items():
@@ -223,8 +227,8 @@ def generate_dashboard_html(data: dict) -> str:
         imp_color = "num" if imp_pct >= 0 else "neg"
 
         datasets_html += f"""
-        <div class="dataset-section">
-            <h2>{name}</h2>
+        <div class="dataset-section" id="{name}">
+            <h2><a href="#{name}" class="section-anchor">{name}</a></h2>
             <div class="subtitle">{ds.get("sota_hypothesis", "")}</div>
             <div class="stats-row">
                 <div class="stat">Experiments: <strong>{ds["total"]}</strong></div>
@@ -249,7 +253,6 @@ def generate_dashboard_html(data: dict) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="30">
     <title>Fraud Auto-Research Dashboard</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -311,6 +314,12 @@ def generate_dashboard_html(data: dict) -> str:
         .row-discard:hover {{ background: #1e293b; }}
         .row-crash {{ background: #1a0a0a; opacity: 0.7; }}
 
+        .nav-bar {{ background: #1e293b; border-radius: 8px; padding: 10px 16px; margin-bottom: 20px; font-size: 13px; }}
+        .nav-link {{ color: #60a5fa; text-decoration: none; font-weight: 600; }}
+        .nav-link:hover {{ color: #93c5fd; text-decoration: underline; }}
+        .section-anchor {{ color: inherit; text-decoration: none; }}
+        .section-anchor:hover {{ color: #60a5fa; }}
+
         .footer {{ text-align: center; padding: 16px; font-size: 11px; color: #475569; }}
 
         @media (max-width: 1000px) {{
@@ -325,9 +334,9 @@ def generate_dashboard_html(data: dict) -> str:
             <h1>Fraud Auto-Research Dashboard</h1>
             <div class="meta">Last updated: {ts_display} &nbsp;|&nbsp; Selection on val · OOT is held-out reporting</div>
         </div>
-        <span class="live">AUTO-REFRESH 30s</span>
     </div>
     <div class="container">
+        {nav_html}
         <div class="cards">{cards_html}</div>
         <div id="datasets">{datasets_html}</div>
     </div>
