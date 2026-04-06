@@ -290,7 +290,7 @@ def generate_dashboard_html(data: dict) -> str:
         .exp-table td {{ padding: 6px 6px; border-bottom: 1px solid #1e2a3a; vertical-align: middle; }}
         .td-id {{ color: #64748b; font-size: 11px; white-space: nowrap; }}
         .td-status {{ text-align: center; white-space: nowrap; }}
-        .td-hyp {{ max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cbd5e1; }}
+        .td-hyp {{ max-width: 320px; color: #cbd5e1; white-space: normal; word-break: break-word; line-height: 1.4; }}
         .td-num {{ text-align: right; font-variant-numeric: tabular-nums; color: #94a3b8; white-space: nowrap; }}
         .td-oot {{ color: #f59e0b; }}
 
