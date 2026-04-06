@@ -8,25 +8,7 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 **[→ View full dashboard](reports/dashboard.html)** — self-contained HTML, download and open locally or view via GitHub Pages.
 
-Current active runs across three datasets:
-
-| Dataset | Experiments | Best AUPRC (val) | Best AUPRC (OOT) |
-|---------|-------------|-----------------|-----------------|
-| IEEE-CIS | active | — | — |
-| fraud-sim | active | — | — |
-| FDH | active | — | — |
-
-### IEEE-CIS
-
-![IEEE-CIS results](reports/plot_ieee-cis.png)
-
-### fraud-sim
-
 ![Fraud-Sim results](reports/plot_fraud-sim.png)
-
-### FDH (Fraud Detection Handbook)
-
-![FDH results](reports/plot_fdh.png)
 
 Plots show five panels: Composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, PSI. Green ● line = val (drives keep/discard). Sky blue ◆ = OOT held-out (one point per experiment). Red ✕ = discarded.
 
@@ -378,3 +360,15 @@ python3 -m harness.dashboard --open
 - `pandas`, `numpy`, `scikit-learn`, `xgboost`, `matplotlib`, `pyarrow`, `pyyaml`
 - Optional: `lightgbm`, `scipy`
 - GPU: CUDA auto-detected for XGBoost (`tree_method=hist, device=cuda`)
+
+---
+
+## All Dataset Plots
+
+### IEEE-CIS
+
+![IEEE-CIS results](reports/plot_ieee-cis.png)
+
+### FDH (Fraud Detection Handbook)
+
+![FDH results](reports/plot_fdh.png)
