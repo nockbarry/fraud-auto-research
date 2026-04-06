@@ -4,6 +4,34 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 ---
 
+## Live Results
+
+**[→ View full dashboard](reports/dashboard.html)** — self-contained HTML, download and open locally or view via GitHub Pages.
+
+Current active runs across three datasets:
+
+| Dataset | Experiments | Best AUPRC (val) | Best AUPRC (OOT) |
+|---------|-------------|-----------------|-----------------|
+| IEEE-CIS | active | — | — |
+| fraud-sim | active | — | — |
+| FDH | active | — | — |
+
+### IEEE-CIS
+
+![IEEE-CIS results](reports/plot_ieee-cis.png)
+
+### fraud-sim
+
+![Fraud-Sim results](reports/plot_fraud-sim.png)
+
+### FDH (Fraud Detection Handbook)
+
+![FDH results](reports/plot_fdh.png)
+
+Plots show five panels: Composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, PSI. Green ● line = val (drives keep/discard). Sky blue ◆ = OOT held-out (one point per experiment). Red ✕ = discarded.
+
+---
+
 ## What This Is Built For
 
 The framework is designed for **production-grade fraud feature engineering** on enriched transaction data — raw transactions pre-joined to any combination of:
@@ -73,12 +101,15 @@ fraud-auto-research/
 │
 ├── configs/
 │   ├── ieee-cis.yaml       # IEEE-CIS config + dataset_profile
-│   └── fraud-sim.yaml      # Fraud-sim config + dataset_profile
+│   ├── fraud-sim.yaml      # Fraud-sim config + dataset_profile
+│   └── fdh.yaml            # FDH config + dataset_profile
 │
 ├── features_ieee.py        # AGENT-EDITABLE — IEEE-CIS feature transforms
 ├── features_sim.py         # AGENT-EDITABLE — fraud-sim feature transforms
+├── features_fdh.py         # AGENT-EDITABLE — FDH feature transforms
 ├── model_ieee.py           # AGENT-EDITABLE — IEEE-CIS model definition
 ├── model_sim.py            # AGENT-EDITABLE — fraud-sim model definition
+├── model_fdh.py            # AGENT-EDITABLE — FDH model definition
 │
 ├── harness/                # READ-ONLY — the fixed measurement apparatus
 │   ├── evaluate.py         # Pipeline: load → fit → transform → validate → train → metrics
@@ -97,26 +128,20 @@ fraud-auto-research/
 │       │   ├── features.py   # Code snapshot
 │       │   ├── model.py      # Code snapshot
 │       │   ├── metrics.json  # AUPRC, precision, PSI, CIs, feature importances
-│       │   ├── state.json    # Fitted state dict (deployable artifact)
 │       │   └── metadata.json # Hypothesis, status, timestamp, parent
 │       ├── index.jsonl       # Append-only log
 │       └── sota -> exp_NNN_  # Symlink to current best
 │
 ├── data/                   # Source parquet files (not in repo)
-│   ├── raw_train.parquet
-│   ├── raw_val.parquet
-│   ├── raw_oot.parquet
-│   └── fraud-sim/
-│       └── raw_{train,val,oot}.parquet
+│   ├── ieee-cis/
+│   ├── fraud-sim/
+│   └── fdh/
 │
-├── reports/                # Auto-generated after each experiment
-│   ├── dashboard.html      # Self-contained (no server needed, works via file://)
-│   ├── plot_ieee-cis.png
-│   └── plot_fraud-sim.png
-│
-└── docs/                   # Static docs assets
-    ├── plot_ieee-cis_baseline.png
-    └── plot_fraud-sim_baseline.png
+└── reports/                # Regenerated after each experiment — committed to repo
+    ├── dashboard.html      # Self-contained (plots embedded as base64, works via file://)
+    ├── plot_ieee-cis.png
+    ├── plot_fraud-sim.png
+    └── plot_fdh.png
 ```
 
 ---
@@ -143,22 +168,23 @@ The harness strips labels before calling `transform()`. A leakage detector flags
 ### Composite score
 
 ```
-composite_score = 0.50 × AUPRC + 0.30 × Precision@Recall(80%) − 0.20 × PSI_penalty
+composite_score = 0.50 × AUPRC_val + 0.30 × Precision@Recall_val(80%) − 0.20 × PSI_penalty
 ```
 
-AUPRC on the OOT holdout is the primary metric. Precision at 80% recall captures operating-point performance. PSI (Population Stability Index) between val and OOT score distributions penalizes instability — hard-reject at PSI ≥ 0.25.
+**Keep/discard decisions are made on val.** OOT (out-of-time holdout) is never used for selection — it is purely a generalization check reported alongside. This prevents the agent from implicitly overfitting to the holdout set over many iterations.
 
-### Experiment tracking without git
+PSI (Population Stability Index) between val and OOT score distributions penalizes instability — hard-reject at PSI ≥ 0.25.
 
-Every experiment — kept or discarded — is saved as a directory with code snapshots, metrics, and fitted state. A `sota` symlink always points to the current best. No git operations needed during the loop; nothing is ever lost.
+### Experiment tracking
+
+Every experiment — kept or discarded — is saved as a directory with code snapshots and metrics. A `sota` symlink always points to the current best. Nothing is ever lost.
 
 ### Structured agent context
 
-After every `--save` run, the harness prints:
+After every `--save` run, the harness prints a context block the agent uses for the next iteration:
 
 ```
-SOTA: exp_011 — AUPRC=0.6089, Composite=0.3966
-  Top features: mc_amt_ratio_median=0.19, mc_amt_zscore=0.13 ...
+SOTA: exp_011 — AUPRC_val=0.6089 | AUPRC_oot=0.5934 | Composite(val)=0.3966
 
 Technique success rates:
   behavioral     2/5 kept (40%)
@@ -169,71 +195,21 @@ Untried: anomaly, geo_features, velocity, interaction_te ...
 Warning: 3-experiment discard streak — try a different category.
 ```
 
-This is the agent's memory. It prevents repeating failed approaches and surfaces untried territory automatically.
-
 ---
 
 ## Included Datasets
 
 ### IEEE-CIS Fraud Detection
 
-590K card-not-present transactions from the [Vesta Corporation IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection). The original V1–V339, C1–C14, D1–D15, and M1–M9 derived features are stripped — the agent starts from 55 raw columns: transaction amount, card info, addresses, email domains, device/identity fields, and M-fields (boolean match flags). 3.5% fraud rate, stable OOT.
+590K card-not-present transactions from the [Vesta Corporation IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection). The original V1–V339, C1–C14, D1–D15, and M1–M9 derived features are stripped — the agent starts from 55 raw columns: transaction amount, card info, addresses, email domains, device/identity fields, and M-fields (boolean match flags). 3.5% fraud rate, stable OOT. Baseline AUPRC ~0.23.
 
 ### Fraud-Sim
 
-1.8M simulated credit card transactions from [Sparkov simulation](https://www.kaggle.com/datasets/kartik2112/fraud-detection). 16 raw columns: merchant, category, amount, geographic coordinates, demographics. 0.5% fraud rate with a 42% population shift in OOT (fraud rate drops 0.58% → 0.33%) — a challenging test for model stability. Reward for PSI-safe features.
+1.8M simulated credit card transactions from [Sparkov simulation](https://www.kaggle.com/datasets/kartik2112/fraud-detection). 16 raw columns: merchant, category, amount, geographic coordinates, demographics. 0.5% fraud rate with a 42% population shift in OOT — a challenging test for model stability. Baseline AUPRC ~0.51.
 
----
+### FDH (Fraud Detection Handbook)
 
-## Example Runs
-
-Plots show five panels: composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, and PSI. Green circles/line = val (drives keep/discard). Amber diamonds = OOT held-out. Red ✕ = discarded.
-
-### IEEE-CIS — Most Recent Run
-
-![IEEE-CIS current plot](docs/plot_ieee-cis_current.png)
-
-24 experiments, 6 kept. AUPRC OOT: **0.178 → 0.192 (+7.7%)**. Published ceiling with full derived features: ~0.50.
-
-| # | Status | AUPRC val | AUPRC OOT | Hypothesis |
-|---|--------|-----------|-----------|------------|
-| 0 | crash | — | — | First attempt — string columns not encoded |
-| 1 | **keep** | 0.227 | **0.178** | Clean baseline: TE + freq encoding + amount/time |
-| 3 | **keep** | 0.228 | 0.178 | Amount patterns: round numbers, cents, corridors |
-| 6 | **keep** | 0.232 | 0.185 | Velocity + behavioral profiling (card1 inter-transaction gaps) |
-| 15 | **keep** | 0.241 | 0.193 | Focal loss ensemble: standard XGB + focal loss averaged |
-| 18 | **keep** | **0.249** | **0.192** | addr2 card-sharing count (fraud ring signal) |
-
-Top features: `addr2_log_n_cards` (0.36), `addr2_n_cards` (0.34), `amt_is_round` (0.05). The addr2 region sharing count — how many distinct cards transact from the same billing region — emerged as the dominant signal, consistent with fraud ring detection patterns.
-
----
-
-### Fraud-Sim — Most Recent Run
-
-![Fraud-Sim current plot](docs/plot_fraud-sim_current.png)
-
-21 experiments, 5 kept. AUPRC OOT: **0.499 → 0.690 (+38.4%)**. Strong improvement driven by behavioral amount deviation features.
-
-| # | Status | AUPRC val | AUPRC OOT | Hypothesis |
-|---|--------|-----------|-----------|------------|
-| 0 | **keep** | 0.512 | **0.499** | Clean baseline: TE + freq encoding + behavioral deviations |
-| 4 | **keep** | 0.561 | 0.556 | Geo: haversine home→merchant distance |
-| 6 | **keep** | 0.588 | 0.582 | Cyclical time features (hour sin/cos) + OOF target encoding |
-| 9 | **keep** | 0.629 | 0.624 | Extended behavioral: per-merchant/category amount corridors (Q25/Q75) |
-| 13 | **keep** | **0.676** | **0.690** | Model tuning: scale_pos_weight=2.0 (undertrained baseline fixed) |
-
-Top features: `merchant_amt_zscore` (0.20), `category_amt_zscore` (0.19), `category_target_enc` (0.15), `hour_cos` (0.05). Behavioral deviation features (z-scores vs. merchant/category baseline) dominate — this is the characteristic signal of the Sparkov simulation.
-
-> **Note on val vs OOT:** All keep/discard decisions are based on val composite score. The OOT AUPRC is held-out and never used for selection — it is purely a generalization check. For fraud-sim the OOT AUPRC slightly exceeds val AUPRC (0.690 vs 0.676) because the OOT split has a lower fraud rate (0.33% vs 0.58%), making the harder-to-detect frauds proportionally rarer and the model's precision slightly higher.
-
----
-
-### Baseline Only
-
-For reference, the original clean baselines before any agent iteration:
-
-![IEEE-CIS baseline plot](docs/plot_ieee-cis_baseline.png)
-![Fraud-Sim baseline plot](docs/plot_fraud-sim_baseline.png)
+1.75M simulated card transactions from the [Fraud Detection Handbook](https://github.com/Fraud-Detection-Handbook/simulated-data-raw). Deliberately minimal: only 6 raw columns (CUSTOMER_ID, TERMINAL_ID, TX_DATETIME, TX_AMOUNT, and two derived time fields). All signal must be engineered. Three fraud scenarios: high-amount anomaly, terminal compromise (28-day windows), and card-not-present (many small amounts across many terminals). 0.84% fraud rate. Baseline AUPRC ~0.25 — expected ceiling with good velocity features ~0.80.
 
 ---
 
@@ -241,7 +217,7 @@ For reference, the original clean baselines before any agent iteration:
 
 ### Input Data Model
 
-The parquet files handed to the agent should be **fully-joined, transaction-level DataFrames** — raw transaction columns plus any enrichment you want the agent to work with:
+The parquet files handed to the agent should be **fully-joined, transaction-level DataFrames**:
 
 ```
 raw_train.parquet / raw_val.parquet / raw_oot.parquet
@@ -249,25 +225,18 @@ raw_train.parquet / raw_val.parquet / raw_oot.parquet
 ├── Core transaction cols    — amount, timestamp, product/category
 ├── Card / account cols      — card ID, account age, card type, issuer
 ├── Address cols             — billing addr, shipping addr, match flags
-├── Device cols (optional)   — fingerprint ID, device type, OS, browser,
-│                              battery_level, clock_skew_ms, session_duration
-├── IP cols (optional)       — ip_address, ip_proxy_score, ip_isp, ip_country
+├── Device cols (optional)   — fingerprint ID, device type, OS, browser
+├── IP cols (optional)       — ip_address, ip_proxy_score, ip_isp
 ├── Email cols (optional)    — email domain, email local part, domain age
 ├── Vendor cols (optional)   — merchant ID, MCC, merchant_risk_tier
-├── Pre-computed aggregates  — card_txn_count_7d, card_amt_sum_24h, etc.
-│                              (optional; agent can also engineer these itself)
 └── label                    — 0/1 fraud indicator
 ```
-
-The agent's `fit()` function sees the full joined DataFrame and decides which columns to use. Columns the agent doesn't use are simply ignored. The `dataset_profile` in the config tells the agent what's available (`has_geo`, `has_identity`, `has_device`), so it selects appropriate recipe patterns without guessing.
-
-**Pre-computed aggregates are optional but valuable.** If your data pipeline already produces velocity counts (transactions in the last 24h per card), pass them through — the agent will use them directly and can build on top of them with ratio and z-score features. If not, the agent will engineer them itself from the raw timestamp + entity ID columns using the fit/transform API.
 
 ### 1. Prepare data
 
 ```
 data/my-dataset/
-├── raw_train.parquet   # label col = 0/1, all joined enrichment columns included
+├── raw_train.parquet
 ├── raw_val.parquet
 └── raw_oot.parquet
 ```
@@ -297,35 +266,24 @@ metrics:
 dataset_profile:
   fraud_rate: 0.01
   n_rows: 500000
-  n_raw_features: 30
-  # Tell the agent what enrichment columns are present:
-  has_geo: false            # lat/lon or geo region columns
-  has_identity: true        # email, device, address match flags
-  has_device: true          # device fingerprint, OS, browser, session signals
-  has_ip: false             # IP address or IP-derived signals
-  has_email: true           # email domain/local-part columns
-  has_vendor: false         # merchant/MCC/vendor enrichment
-  has_precomputed_aggs: false  # pre-built velocity counts from upstream pipeline
-  population_shift: low     # low / medium / high — tunes PSI penalty weight
-  key_entity_col: "card_id" # primary entity for behavioral profiling
-  fraud_type: "cnp"         # cnp / ato / first_party / synthetic_id / ao / aml
-  # Agent uses these flags to select relevant recipes and fraud_practices.md sections
+  has_geo: false
+  has_identity: true
+  population_shift: low
+  key_entity_col: "card_id"
 ```
 
 ### 3. Write baseline files
 
-**`features_mydataset.py`** — encode categoricals, handle NaNs:
+**`features_mydataset.py`**:
 
 ```python
 def fit(df_train, y_train, config):
     state = {"global_mean": float(y_train.mean())}
-    # frequency encode all string columns
     cat_cols = df_train.select_dtypes("object").columns.tolist()
     state["cat_cols"] = cat_cols
     for col in cat_cols:
         freq = df_train[col].value_counts(normalize=True).to_dict()
         state[f"{col}_freq"] = {str(k): float(v) for k, v in freq.items()}
-    # drop high-NaN columns
     nan_rates = df_train.isnull().mean()
     state["drop_cols"] = nan_rates[nan_rates > 0.5].index.tolist()
     return state
@@ -339,7 +297,7 @@ def transform(df, state, config):
     return df.fillna(-1)
 ```
 
-**`model_mydataset.py`** — GPU auto-detected:
+**`model_mydataset.py`**:
 
 ```python
 import xgboost as xgb
@@ -365,14 +323,12 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
 ### 4. Seed and run
 
 ```bash
-# Establish baseline
+pip install -e .
+
 python3 -m harness.evaluate --config configs/my-dataset.yaml \
     --save --hypothesis "baseline"
 
-# View what the agent sees
 python3 -m harness.context my-dataset
-
-# Open dashboard
 python3 -m harness.dashboard --open
 ```
 
@@ -388,26 +344,18 @@ The harness is domain-agnostic — only the config, feature files, model files, 
 
 | What to change | What stays the same |
 |----------------|---------------------|
-| `configs/*.yaml` — data paths, metric weights, domain profile, enrichment flags | `harness/evaluate.py` — pipeline orchestration |
+| `configs/*.yaml` — data paths, metric weights, domain profile | `harness/evaluate.py` — pipeline orchestration |
 | `features_*.py` — domain-specific transforms | `harness/experiment_tracker.py` — tracking |
 | `model_*.py` — algorithm choices | `harness/context.py` — agent memory |
 | `recipes.md` — domain feature patterns | `harness/dashboard.py` — dashboard |
-| `program.md` — agent strategy guidance | `harness/data_loader.py`, `validate_features.py`, etc. |
-| `fraud_practices.md` → `domain_practices.md` | All metric computation |
-| Input data joins (upstream, before parquet files) | Fit/transform API contract |
-
-**What the harness never needs to know about:** how the parquet files were produced. The upstream join of transactions to vendor/device/IP/email enrichment is done outside the harness — in your ETL, dbt, or Spark pipeline. Once the data lands as a flat parquet file, the agent takes over. This means you can iterate on enrichment sources independently from the agent loop: add a new vendor signal column to the parquet files and the agent will discover and use it in the next run.
-
-The composite score formula is fully configurable via YAML weights. If you need a different primary metric (e.g., log loss, Gini, custom threshold metric), modify `evaluate.py` — it's the one harness file designed to be customized for new domains.
+| `program.md` — agent strategy guidance | All metric computation |
+| `fraud_practices.md` → `domain_practices.md` | Fit/transform API contract |
 
 ---
 
 ## Running the Agent
 
 ```bash
-# Install
-pip install -e .
-
 # Single evaluation
 python3 -m harness.evaluate --config configs/ieee-cis.yaml \
     --save --hypothesis "add velocity features"
@@ -418,11 +366,9 @@ python3 -m harness.experiment_tracker ieee-cis
 # View agent context
 python3 -m harness.context ieee-cis
 
-# Regenerate dashboard (self-contained HTML, works via file://)
+# Regenerate dashboard
 python3 -m harness.dashboard --open
 ```
-
-The system runs two datasets in parallel by assigning each a separate `features_*.py` and `model_*.py` file, so agents don't conflict on shared state.
 
 ---
 
@@ -430,5 +376,5 @@ The system runs two datasets in parallel by assigning each a separate `features_
 
 - Python 3.10+
 - `pandas`, `numpy`, `scikit-learn`, `xgboost`, `matplotlib`, `pyarrow`, `pyyaml`
-- Optional: `google-cloud-bigquery` (for BQ data sources), `lightgbm`, `scipy`
-- GPU: CUDA GPU auto-detected for XGBoost (`tree_method=hist, device=cuda`)
+- Optional: `lightgbm`, `scipy`
+- GPU: CUDA auto-detected for XGBoost (`tree_method=hist, device=cuda`)
