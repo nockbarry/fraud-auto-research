@@ -8,6 +8,12 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 **[→ View full dashboard](https://nockbarry.github.io/fraud-auto-research/reports/dashboard.html)**
 
+| Dataset | Experiments | Best AUPRC (val) | Best AUPRC (OOT) |
+|---------|-------------|-----------------|-----------------|
+| fraud-sim | 21 | 0.6710 | 0.6912 |
+| ieee-cis | 14 | 0.3091 | 0.2086 |
+| fdh | 26 | 0.3522 | 0.2441 |
+
 ![Fraud-Sim results](reports/plot_fraud-sim.png)
 
 Plots show five panels: Composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, PSI. Green ● line = val (drives keep/discard). Sky blue ◆ = OOT held-out (one point per experiment). Red ✕ = discarded.
