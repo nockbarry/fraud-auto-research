@@ -1,360 +1,219 @@
-"""Feature transforms for fraud-sim dataset. Edited by the agent.
+"""Feature engineering for fraud-sim dataset. Agent-editable.
 
-API CONTRACT:
-  fit(df_train, y_train, config) -> state
-      Called ONCE on training data WITH labels.
-      Return a JSON-serializable dict of fitted parameters.
-  transform(df, state, config) -> df
-      Called on EACH split WITHOUT labels.
-      Use only the state dict from fit(). No access to labels.
+Fit/transform API:
+  fit(df_train, y_train, config) -> state dict (JSON-serializable)
+  transform(df, state, config)   -> df (all numeric, no labels)
 
-Dataset: 1.8M simulated transactions, 16 raw columns.
-Key columns: merchant, category, TransactionAmt, gender, city, state, zip,
-             lat, long, merch_lat, merch_long, city_pop, job, TransactionDT
-NOTE: 42% population shift in OOT -- avoid features that track fraud rate directly.
+Actual columns: card_id, merchant, category, TransactionAmt, gender, city, state, zip,
+                lat, long, city_pop, job, unix_time, merch_lat, merch_long, TransactionDT
 """
-
-import numpy as np
 import pandas as pd
+import numpy as np
 
 
-def _target_encode_fit(series, y, global_mean, min_samples=20, smoothing_width=10):
-    df_tmp = pd.DataFrame({"col": series, "_y": y.values})
-    stats = df_tmp.groupby("col")["_y"].agg(["mean", "count"])
-    smoothing = 1 / (1 + np.exp(-(stats["count"] - min_samples) / smoothing_width))
-    te = smoothing * stats["mean"] + (1 - smoothing) * global_mean
-    return {str(k): float(v) for k, v in te.items()}
+def _smooth_target_enc(series: pd.Series, labels: pd.Series, min_samples: int = 30, global_mean: float = 0.0) -> dict:
+    """Compute smoothed target encoding: weight group mean toward global mean."""
+    df = pd.DataFrame({"key": series, "label": labels})
+    stats = df.groupby("key")["label"].agg(["sum", "count"]).reset_index()
+    stats.columns = ["key", "sum", "count"]
+    stats["rate"] = stats["sum"] / stats["count"]
+    # Smoothing: blend toward global mean by min_samples
+    stats["smoothed"] = (stats["sum"] + global_mean * min_samples) / (stats["count"] + min_samples)
+    return {str(k): float(v) for k, v in zip(stats["key"], stats["smoothed"])}
 
 
 def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
-    state = {}
+    """Fit on training data only. Returns JSON-serializable state."""
+    state: dict = {}
     global_mean = float(y_train.mean())
     state["global_mean"] = global_mean
 
-    cfg = config.get("dataset_profile", {})
-    min_s = cfg.get("recommended_te_smoothing", {}).get("min_samples", 20)
-    smooth_w = cfg.get("recommended_te_smoothing", {}).get("smoothing_width", 10)
-
-    card_col = "card_id"
-    time_col = "TransactionDT"
-    amt_col = "TransactionAmt"
-
-    state["card_col"] = card_col
-    state["time_col"] = time_col
-    state["amt_col"] = amt_col
-
-    # Find high-NaN columns to drop
+    # Drop columns with >50% NaN
     nan_rates = df_train.isnull().mean()
-    drop_cols = nan_rates[nan_rates > 0.50].index.tolist()
-    state["drop_cols"] = drop_cols
+    state["drop_cols"] = nan_rates[nan_rates > 0.50].index.tolist()
+    df_tmp = df_train.drop(columns=state["drop_cols"], errors="ignore")
 
-    # Target encoding for key high-cardinality columns
-    for col in ["merchant", "category", "city", "state", "job"]:
-        if col in df_train.columns and col not in drop_cols:
-            state[f"{col}_te"] = _target_encode_fit(df_train[col], y_train, global_mean, min_s, smooth_w)
-
-    # Frequency encoding for all remaining string columns
-    cat_cols = df_train.drop(columns=drop_cols, errors="ignore").select_dtypes(include="object").columns.tolist()
+    # Identify categorical columns (excluding ID cols we handle separately)
+    cat_cols = df_tmp.select_dtypes("object").columns.tolist()
+    # Remove cols handled with target encoding or separate logic
+    # Also remove city (894 unique, noisy) and job (494 unique, handled separately)
+    skip_freq = {"merchant", "category", "city"}
+    cat_cols = [c for c in cat_cols if c not in skip_freq]
     state["cat_cols"] = cat_cols
+
+    # Frequency encoding for remaining categoricals
     for col in cat_cols:
-        freq = df_train[col].value_counts(normalize=True).to_dict()
+        freq = df_tmp[col].value_counts(normalize=True).to_dict()
         state[f"{col}_freq"] = {str(k): float(v) for k, v in freq.items()}
 
-    # Per-merchant/category/gender amount statistics (stable across time)
-    if amt_col in df_train.columns:
-        for grp_col in ["merchant", "category", "gender"]:
-            if grp_col in df_train.columns:
-                stats = df_train.groupby(grp_col)[amt_col].agg(["median", "std"])
-                state[f"{grp_col}_amt_median"] = {str(k): float(v) for k, v in stats["median"].items()}
-                state[f"{grp_col}_amt_std"] = {str(k): float(v) for k, v in stats["std"].fillna(1.0).items()}
-        state["global_amt_median"] = float(df_train[amt_col].median())
-        state["global_amt_std"] = float(df_train[amt_col].std())
+    # --- Target encoding: category (smoothed fraud rate) ---
+    if "category" in df_tmp.columns:
+        state["category_te"] = _smooth_target_enc(df_tmp["category"], y_train, min_samples=30, global_mean=global_mean)
 
-    # ----------------------------------------------------------------
-    # VELOCITY FEATURES (Recipe 2) — per-card temporal statistics
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and time_col in df_train.columns:
-        df_sorted = df_train.sort_values([card_col, time_col])
-        df_sorted["_gap"] = df_sorted.groupby(card_col)[time_col].diff()
+    # --- Target encoding: merchant (smoothed fraud rate, ~670 unique) ---
+    if "merchant" in df_tmp.columns:
+        state["merchant_te"] = _smooth_target_enc(df_tmp["merchant"], y_train, min_samples=30, global_mean=global_mean)
 
-        gap_stats = df_sorted.groupby(card_col)["_gap"].agg(["median", "std", "min", "count"])
-        df_sorted["_is_burst"] = (df_sorted["_gap"] < 60).astype(int)
-        burst_counts = df_sorted.groupby(card_col)["_is_burst"].sum()
+    # --- Behavioral profiling: per-card (card_id) aggregations ---
+    if "card_id" in df_tmp.columns and "TransactionAmt" in df_tmp.columns:
+        card_stats = df_tmp.groupby("card_id")["TransactionAmt"].agg(
+            card_mean="mean",
+            card_std="std",
+            card_max="max",
+            card_median="median",
+            card_count="count",
+        ).reset_index()
+        card_stats["card_std"] = card_stats["card_std"].fillna(0.0)
+        state["card_mean"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_mean"])}
+        state["card_std"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_std"])}
+        state["card_max"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_max"])}
+        state["card_median"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_median"])}
+        state["card_count"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_count"])}
+        state["global_amt_mean"] = float(df_tmp["TransactionAmt"].mean())
+        state["global_amt_std"] = float(df_tmp["TransactionAmt"].std())
 
-        time_range = df_sorted.groupby(card_col)[time_col].agg(["min", "max"])
-        time_range["days"] = ((time_range["max"] - time_range["min"]) / 86400).clip(lower=1)
-        daily_rate = gap_stats["count"] / time_range["days"]
+    # --- Amount vs category median ---
+    if "category" in df_tmp.columns and "TransactionAmt" in df_tmp.columns:
+        cat_median = df_tmp.groupby("category")["TransactionAmt"].median().to_dict()
+        state["cat_median_amt"] = {str(k): float(v) for k, v in cat_median.items()}
 
-        state["velocity_median_gap"] = {str(k): float(v) for k, v in gap_stats["median"].fillna(0).items()}
-        state["velocity_std_gap"] = {str(k): float(v) for k, v in gap_stats["std"].fillna(0).items()}
-        state["velocity_min_gap"] = {str(k): float(v) for k, v in gap_stats["min"].fillna(0).items()}
-        state["velocity_burst_count"] = {str(k): int(v) for k, v in burst_counts.items()}
-        state["velocity_daily_rate"] = {str(k): float(v) for k, v in daily_rate.items()}
+    # --- Merchant transaction volume (how busy is this merchant) ---
+    if "merchant" in df_tmp.columns:
+        merch_volume = df_tmp["merchant"].value_counts().to_dict()
+        state["merchant_volume"] = {str(k): int(v) for k, v in merch_volume.items()}
 
-        # Per-card transaction count
-        card_txn_count = df_sorted.groupby(card_col)[time_col].count()
-        state["card_txn_count"] = {str(k): int(v) for k, v in card_txn_count.items()}
+    # --- Per-card: fraud-related behavioral ratios ---
+    # Number of unique merchants per card (indicates spread of transactions)
+    if "card_id" in df_tmp.columns and "merchant" in df_tmp.columns:
+        card_merch_counts = df_tmp.groupby("card_id")["merchant"].nunique()
+        state["card_n_merchants"] = {str(k): int(v) for k, v in card_merch_counts.items()}
 
-    # ----------------------------------------------------------------
-    # BEHAVIORAL PROFILING (Recipe 3) — per-card amount stats
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and amt_col in df_train.columns:
-        card_amt = df_train.groupby(card_col)[amt_col].agg(["mean", "std", "median", "max", "count"])
-        state["behav_amt_mean"] = {str(k): float(v) for k, v in card_amt["mean"].items()}
-        state["behav_amt_std"] = {str(k): float(v) for k, v in card_amt["std"].fillna(1).items()}
-        state["behav_amt_median"] = {str(k): float(v) for k, v in card_amt["median"].items()}
-        state["behav_amt_max"] = {str(k): float(v) for k, v in card_amt["max"].items()}
-        state["behav_txn_count"] = {str(k): int(v) for k, v in card_amt["count"].items()}
-
-    if card_col in df_train.columns and time_col in df_train.columns:
-        df_train_copy = df_train.copy()
-        df_train_copy["_hour"] = (df_train_copy[time_col] % 86400) / 3600
-        hour_stats = df_train_copy.groupby(card_col)["_hour"].agg(["mean", "std"])
-        state["behav_hour_mean"] = {str(k): float(v) for k, v in hour_stats["mean"].items()}
-        state["behav_hour_std"] = {str(k): float(v) for k, v in hour_stats["std"].fillna(4).items()}
-
-    # ----------------------------------------------------------------
-    # ANOMALY SCORE (Recipe 6) — Mahalanobis from training centroid
-    # ----------------------------------------------------------------
-    num_cols = df_train.select_dtypes(include=[np.number]).columns.tolist()
-    exclude_cols = {card_col, time_col, "TransactionID", "txn_id", "label", "is_fraud"}
-    anomaly_cols = [c for c in num_cols if c not in exclude_cols and df_train[c].std() > 0][:20]
-    col_means = {c: float(df_train[c].mean()) for c in anomaly_cols}
-    col_stds = {c: float(df_train[c].std()) for c in anomaly_cols}
-    state["anomaly_cols"] = anomaly_cols
-    state["anomaly_means"] = col_means
-    state["anomaly_stds"] = col_stds
-
-    # ----------------------------------------------------------------
-    # PER-CARD-CATEGORY AMOUNT STATS — "is this unusual for this card in this category?"
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and "category" in df_train.columns and amt_col in df_train.columns:
-        cc_key = df_train[card_col].astype(str) + "_" + df_train["category"].astype(str)
-        cc_stats = df_train.assign(_cc_key=cc_key).groupby("_cc_key")[amt_col].agg(["mean", "std", "count"])
-        state["card_cat_amt_mean"] = {str(k): float(v) for k, v in cc_stats["mean"].items()}
-        state["card_cat_amt_std"] = {str(k): float(v) for k, v in cc_stats["std"].fillna(1).items()}
-        state["card_cat_txn_count"] = {str(k): int(v) for k, v in cc_stats["count"].items()}
-
-    # ----------------------------------------------------------------
-    # PER-CARD WEEKEND RATIO AND NIGHT RATIO
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and time_col in df_train.columns:
-        df_tmp = df_train.copy()
-        df_tmp["_hour"] = df_tmp[time_col] // 3600 % 24
-        df_tmp["_dow"] = df_tmp[time_col] // 86400 % 7
-        df_tmp["_is_night"] = ((df_tmp["_hour"] < 6) | (df_tmp["_hour"] >= 22)).astype(int)
-        df_tmp["_is_weekend"] = (df_tmp["_dow"] >= 5).astype(int)
-        card_night_ratio = df_tmp.groupby(card_col)["_is_night"].mean()
-        card_weekend_ratio = df_tmp.groupby(card_col)["_is_weekend"].mean()
+    # --- Per-card: night transaction ratio ---
+    if "card_id" in df_tmp.columns and "unix_time" in df_tmp.columns:
+        tmp2 = df_tmp.copy()
+        dt = pd.to_datetime(tmp2["unix_time"], unit="s")
+        tmp2["_is_night"] = ((dt.dt.hour >= 22) | (dt.dt.hour < 6)).astype(int)
+        card_night_ratio = tmp2.groupby("card_id")["_is_night"].mean()
         state["card_night_ratio"] = {str(k): float(v) for k, v in card_night_ratio.items()}
-        state["card_weekend_ratio"] = {str(k): float(v) for k, v in card_weekend_ratio.items()}
 
-    # ----------------------------------------------------------------
-    # VELOCITY — hour of week bins (168 bins) per card
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and time_col in df_train.columns:
-        df_tmp2 = df_train.copy()
-        df_tmp2["_hour_of_week"] = (df_tmp2[time_col] // 3600) % 168
-        # Count transactions per card per 6-hour block
-        df_tmp2["_6h_block"] = df_tmp2["_hour_of_week"] // 6
-        card_6h = df_tmp2.groupby([card_col, "_6h_block"]).size()
-        # Store most active 6h block per card
-        if len(card_6h) > 0:
-            card_peak_block = card_6h.groupby(level=0).idxmax().apply(lambda x: x[1] if isinstance(x, tuple) else -1)
-            state["card_peak_6h_block"] = {str(k): int(v) for k, v in card_peak_block.items()}
-
-    # ----------------------------------------------------------------
-    # PER-CARD-MERCHANT STATS
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and "merchant" in df_train.columns and amt_col in df_train.columns:
-        cm_key = df_train[card_col].astype(str) + "_" + df_train["merchant"].astype(str)
-        cm_stats = df_train.assign(_cm_key=cm_key).groupby("_cm_key")[amt_col].agg(["mean", "std", "count"])
-        state["card_merch_amt_mean"] = {str(k): float(v) for k, v in cm_stats["mean"].items()}
-        state["card_merch_amt_std"] = {str(k): float(v) for k, v in cm_stats["std"].fillna(1).items()}
-        state["card_merch_txn_count"] = {str(k): int(v) for k, v in cm_stats["count"].items()}
-        # Is this card's first time at this merchant? (txn count = 0 means new in val/OOT)
-
-    # ----------------------------------------------------------------
-    # VELOCITY EXTENDED — inter-quartile gap, max gap
-    # ----------------------------------------------------------------
-    if card_col in df_train.columns and time_col in df_train.columns:
-        df_sorted2 = df_train.sort_values([card_col, time_col])
-        df_sorted2["_gap2"] = df_sorted2.groupby(card_col)[time_col].diff()
-        gap_q25 = df_sorted2.groupby(card_col)["_gap2"].quantile(0.25)
-        gap_q75 = df_sorted2.groupby(card_col)["_gap2"].quantile(0.75)
-        gap_max = df_sorted2.groupby(card_col)["_gap2"].max()
-        state["velocity_gap_q25"] = {str(k): float(v) for k, v in gap_q25.fillna(0).items()}
-        state["velocity_gap_q75"] = {str(k): float(v) for k, v in gap_q75.fillna(0).items()}
-        state["velocity_gap_max"] = {str(k): float(v) for k, v in gap_max.fillna(0).items()}
-
-        # Weekly transaction count (different from daily rate)
-        df_sorted2["_week"] = df_sorted2[time_col] // (86400 * 7)
-        weekly_counts = df_sorted2.groupby([card_col, "_week"]).size()
-        card_max_weekly = weekly_counts.groupby(level=0).max()
-        card_mean_weekly = weekly_counts.groupby(level=0).mean()
-        state["card_max_weekly_txn"] = {str(k): int(v) for k, v in card_max_weekly.items()}
-        state["card_mean_weekly_txn"] = {str(k): float(v) for k, v in card_mean_weekly.items()}
+    # --- Per-card: unique categories (diversification) ---
+    if "card_id" in df_tmp.columns and "category" in df_tmp.columns:
+        card_cat_counts = df_tmp.groupby("card_id")["category"].nunique()
+        state["card_n_categories"] = {str(k): int(v) for k, v in card_cat_counts.items()}
 
     return state
 
 
 def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
+    """Transform without labels. Apply fitted state."""
     df = df.copy()
-    global_mean = state.get("global_mean", 0.0)
-    amt_col = "TransactionAmt"
-    card_col = state.get("card_col", "card_id")
-    time_col = state.get("time_col", "TransactionDT")
+    df = df.drop(columns=state.get("drop_cols", []), errors="ignore")
 
-    # Drop high-NaN columns
-    drop_cols = state.get("drop_cols", [])
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    # --- Time features from unix_time ---
+    if "unix_time" in df.columns:
+        dt = pd.to_datetime(df["unix_time"], unit="s")
+        df["hour"] = dt.dt.hour
+        df["day_of_week"] = dt.dt.dayofweek
+        df["is_night"] = ((df["hour"] >= 22) | (df["hour"] < 6)).astype(int)
+        # Drop is_weekend (weak) and keep only is_night + hour + day_of_week
+        df = df.drop(columns=["unix_time"])
 
-    # Target encoding
-    for col in ["merchant", "category", "city", "state", "job"]:
-        key = f"{col}_te"
-        if key in state and col in df.columns:
-            df[f"{col}_target_enc"] = df[col].map(state[key]).fillna(global_mean)
+    # Drop high-PSI raw time column
+    if "TransactionDT" in df.columns:
+        df = df.drop(columns=["TransactionDT"])
 
-    # Frequency encoding + drop original string columns
-    cat_cols = state.get("cat_cols", [])
-    for col in cat_cols:
-        key = f"{col}_freq"
-        if key in state and col in df.columns:
-            df[f"{col}_freq_enc"] = df[col].map(state[key]).fillna(0.0)
-    df = df.drop(columns=[c for c in cat_cols if c in df.columns])
+    # --- Geo-distance: haversine between cardholder home and merchant ---
+    if all(c in df.columns for c in ["lat", "long", "merch_lat", "merch_long"]):
+        def haversine(row):
+            lat1, lon1 = np.radians(row["lat"]), np.radians(row["long"])
+            lat2, lon2 = np.radians(row["merch_lat"]), np.radians(row["merch_long"])
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+            return 6371.0 * 2 * np.arcsin(np.sqrt(a))
+        df["home_merch_dist"] = df.apply(haversine, axis=1)
 
-    # Amount deviation features
-    if amt_col in df.columns:
-        g_med = state.get("global_amt_median", 0.0)
-        g_std = state.get("global_amt_std", 1.0)
-        for grp_col in ["merchant", "category", "gender"]:
-            med_key = f"{grp_col}_amt_median"
-            std_key = f"{grp_col}_amt_std"
-            if med_key in state and grp_col in df.columns:
-                grp_med = df[grp_col].map(state[med_key]).fillna(g_med)
-                grp_std = df[grp_col].map(state[std_key]).fillna(g_std)
-                df[f"{grp_col}_amt_zscore"] = (df[amt_col] - grp_med) / (grp_std + 1e-6)
-                df[f"{grp_col}_amt_ratio"] = df[amt_col] / (grp_med + 1e-6)
-        df["log_amt"] = np.log1p(df[amt_col])
+    # --- Amount features (keep only log_amt; drop is_round_amt as it's weak) ---
+    if "TransactionAmt" in df.columns:
+        df["log_amt"] = np.log1p(df["TransactionAmt"])
 
-    # Time features
-    if time_col in df.columns:
-        df["hour"] = (df[time_col] // 3600 % 24).astype(int)
-        df["day_of_week"] = (df[time_col] // 86400 % 7).astype(int)
-        df["is_night"] = ((df["hour"] < 6) | (df["hour"] >= 22)).astype(int)
+    # --- Behavioral profiling: per-card aggregations ---
+    if "card_id" in df.columns and "TransactionAmt" in df.columns:
+        global_mean = state.get("global_amt_mean", 0.0)
+        global_std = state.get("global_amt_std", 1.0)
+        if global_std == 0:
+            global_std = 1.0
 
-    # ----------------------------------------------------------------
-    # VELOCITY FEATURES
-    # ----------------------------------------------------------------
-    if card_col in df.columns:
-        card_str = df[card_col].astype(str)
-        df["velocity_median_gap"] = card_str.map(state.get("velocity_median_gap", {})).fillna(0)
-        df["velocity_std_gap"] = card_str.map(state.get("velocity_std_gap", {})).fillna(0)
-        df["velocity_min_gap"] = card_str.map(state.get("velocity_min_gap", {})).fillna(0)
-        df["velocity_burst_count"] = card_str.map(state.get("velocity_burst_count", {})).fillna(0)
-        df["velocity_daily_rate"] = card_str.map(state.get("velocity_daily_rate", {})).fillna(0)
-        df["card_txn_count"] = card_str.map(state.get("card_txn_count", {})).fillna(0)
-        vdr = df["velocity_daily_rate"]
-        p95 = vdr.quantile(0.95) if len(vdr) > 0 else 1
-        df["is_high_velocity"] = (vdr > p95).astype(int)
-        df["log_velocity_daily_rate"] = np.log1p(df["velocity_daily_rate"])
-        df["log_velocity_burst_count"] = np.log1p(df["velocity_burst_count"])
+        card_mean_map = state.get("card_mean", {})
+        card_std_map = state.get("card_std", {})
+        card_max_map = state.get("card_max", {})
+        card_median_map = state.get("card_median", {})
+        card_count_map = state.get("card_count", {})
 
-    # ----------------------------------------------------------------
-    # BEHAVIORAL PROFILING — amount deviation from card's own history
-    # ----------------------------------------------------------------
-    if card_col in df.columns and amt_col in df.columns:
-        card_str = df[card_col].astype(str)
-        card_mean = card_str.map(state.get("behav_amt_mean", {})).fillna(0)
-        card_std = card_str.map(state.get("behav_amt_std", {})).fillna(1).clip(lower=0.01)
-        card_max = card_str.map(state.get("behav_amt_max", {})).fillna(0)
-        card_median = card_str.map(state.get("behav_amt_median", {})).fillna(0)
+        cc_keys = df["card_id"].astype(str)
+        df["card_mean_amt"] = cc_keys.apply(lambda x: card_mean_map.get(x, global_mean))
+        df["card_std_amt"] = cc_keys.apply(lambda x: card_std_map.get(x, global_std))
+        df["card_max_amt"] = cc_keys.apply(lambda x: card_max_map.get(x, global_mean))
+        df["card_median_amt"] = cc_keys.apply(lambda x: card_median_map.get(x, global_mean))
+        df["card_tx_count"] = cc_keys.apply(lambda x: card_count_map.get(x, 0.0))
 
-        df["behav_amt_zscore"] = (df[amt_col] - card_mean) / card_std
-        df["behav_amt_ratio_max"] = df[amt_col] / card_max.clip(lower=0.01)
-        df["behav_amt_above_median"] = (df[amt_col] > card_median).astype(int)
-        df["behav_is_max_ever"] = (df[amt_col] >= card_max).astype(int)
+        # Amount z-score vs own card history
+        card_std_safe = df["card_std_amt"].replace(0, global_std)
+        df["amt_zscore_card"] = (df["TransactionAmt"] - df["card_mean_amt"]) / card_std_safe
+        # Drop weak/redundant behavioral features
+        df = df.drop(columns=["card_max_amt", "card_std_amt", "card_median_amt", "card_tx_count"], errors="ignore")
+        # Drop amt_vs_card_median (less informative than zscore)
+        # Don't compute it
 
-        # Hour deviation from user's typical pattern
-        if time_col in df.columns:
-            hour_float = (df[time_col] % 86400) / 3600
-            user_hour_mean = card_str.map(state.get("behav_hour_mean", {})).fillna(12)
-            user_hour_std = card_str.map(state.get("behav_hour_std", {})).fillna(4).clip(lower=1)
-            df["behav_hour_deviation"] = abs(hour_float - user_hour_mean) / user_hour_std
+    # Number of unique merchants per card
+    if "card_id" in df.columns:
+        cc_keys2 = df["card_id"].astype(str)
+        card_merch_map = state.get("card_n_merchants", {})
+        df["card_n_merchants"] = cc_keys2.apply(lambda x: card_merch_map.get(x, 1))
+        card_night_map = state.get("card_night_ratio", {})
+        df["card_night_ratio"] = cc_keys2.apply(lambda x: card_night_map.get(x, 0.0))
+        card_ncat_map = state.get("card_n_categories", {})
+        df["card_n_categories"] = cc_keys2.apply(lambda x: card_ncat_map.get(x, 1))
 
-    # ----------------------------------------------------------------
-    # ANOMALY SCORE — Mahalanobis distance from training centroid
-    # ----------------------------------------------------------------
-    anomaly_cols = state.get("anomaly_cols", [])
-    means = state.get("anomaly_means", {})
-    stds = state.get("anomaly_stds", {})
-    if anomaly_cols:
-        z_scores = pd.DataFrame()
-        for c in anomaly_cols:
-            if c in df.columns:
-                z_scores[c] = ((df[c].fillna(0) - means.get(c, 0)) / max(stds.get(c, 1), 0.001)) ** 2
-        if not z_scores.empty:
-            df["anomaly_mahalanobis"] = np.sqrt(z_scores.sum(axis=1))
-            df["anomaly_max_zscore"] = z_scores.max(axis=1)
+    # Remove card_id and high-cardinality noisy cols after features built
+    drop_noise = ["card_id", "city"]
+    df = df.drop(columns=[c for c in drop_noise if c in df.columns])
 
-    # ----------------------------------------------------------------
-    # PER-CARD-CATEGORY AMOUNT STATS
-    # ----------------------------------------------------------------
-    if card_col in df.columns and "category" in df.columns and amt_col in df.columns:
-        card_str_cat = df[card_col].astype(str)
-        cat_str = df["category"].astype(str) if "category" in df.columns else None
-        if cat_str is not None:
-            cc_key = card_str_cat + "_" + cat_str
-            g_mean = float(state.get("global_mean", 0.0))
-            g_amt_mean = float(state.get("global_amt_median", 0.0))
-            cc_amt_mean = cc_key.map(state.get("card_cat_amt_mean", {})).fillna(g_amt_mean)
-            cc_amt_std = cc_key.map(state.get("card_cat_amt_std", {})).fillna(1).clip(lower=0.01)
-            cc_cnt = cc_key.map(state.get("card_cat_txn_count", {})).fillna(0)
-            df["card_cat_amt_zscore"] = (df[amt_col] - cc_amt_mean) / cc_amt_std
-            df["card_cat_txn_count"] = cc_cnt
-            df["log_card_cat_txn_count"] = np.log1p(cc_cnt)
+    # --- Amount vs category median ---
+    if "category" in df.columns and "TransactionAmt" in df.columns:
+        global_amt_mean = state.get("global_amt_mean", 1.0)
+        cat_median_map = state.get("cat_median_amt", {})
+        cat_median_vals = df["category"].apply(lambda x: cat_median_map.get(str(x), global_amt_mean))
+        df["amt_vs_cat_median"] = df["TransactionAmt"] / cat_median_vals.replace(0, global_amt_mean)
 
-    # ----------------------------------------------------------------
-    # PER-CARD TIME PATTERN FEATURES
-    # ----------------------------------------------------------------
-    if card_col in df.columns:
-        card_str3 = df[card_col].astype(str)
-        if "card_night_ratio" in state:
-            df["card_night_ratio"] = card_str3.map(state["card_night_ratio"]).fillna(0)
-        if "card_weekend_ratio" in state:
-            df["card_weekend_ratio"] = card_str3.map(state["card_weekend_ratio"]).fillna(0)
-        if "card_peak_6h_block" in state and time_col in df.columns:
-            card_peak = card_str3.map(state["card_peak_6h_block"]).fillna(-1)
-            current_6h = (df[time_col] // 3600 % 168) // 6
-            df["is_off_peak_block"] = (current_6h != card_peak).astype(int)
+    # --- Target encoding: category ---
+    if "category" in df.columns:
+        te_map = state.get("category_te", {})
+        global_mean = state.get("global_mean", 0.0)
+        df["category_te"] = df["category"].apply(lambda x: te_map.get(str(x), global_mean))
+        df = df.drop(columns=["category"])
 
-    # ----------------------------------------------------------------
-    # PER-CARD-MERCHANT AMOUNT STATS
-    # ----------------------------------------------------------------
-    if card_col in df.columns and "merchant" in df.columns and amt_col in df.columns:
-        card_str4 = df[card_col].astype(str)
-        merch_str = df["merchant"].astype(str)
-        cm_key = card_str4 + "_" + merch_str
-        g_amt = float(state.get("global_amt_median", 0.0))
-        cm_amt_mean = cm_key.map(state.get("card_merch_amt_mean", {})).fillna(g_amt)
-        cm_amt_std = cm_key.map(state.get("card_merch_amt_std", {})).fillna(1).clip(lower=0.01)
-        cm_cnt = cm_key.map(state.get("card_merch_txn_count", {})).fillna(0)
-        df["card_merch_amt_zscore"] = (df[amt_col] - cm_amt_mean) / cm_amt_std
-        df["card_merch_txn_count"] = cm_cnt
-        df["is_new_merchant_for_card"] = (cm_cnt == 0).astype(int)
+    # --- Target encoding: merchant + merchant volume ---
+    if "merchant" in df.columns:
+        te_map = state.get("merchant_te", {})
+        global_mean = state.get("global_mean", 0.0)
+        merch_vol_map = state.get("merchant_volume", {})
+        df["merchant_te"] = df["merchant"].apply(lambda x: te_map.get(str(x), global_mean))
+        df["merchant_volume"] = df["merchant"].apply(lambda x: float(merch_vol_map.get(str(x), 0)))
+        df = df.drop(columns=["merchant"])
 
-    # ----------------------------------------------------------------
-    # VELOCITY EXTENDED FEATURES
-    # ----------------------------------------------------------------
-    if card_col in df.columns:
-        card_str5 = df[card_col].astype(str)
-        df["velocity_gap_q25"] = card_str5.map(state.get("velocity_gap_q25", {})).fillna(0)
-        df["velocity_gap_q75"] = card_str5.map(state.get("velocity_gap_q75", {})).fillna(0)
-        df["velocity_gap_max"] = card_str5.map(state.get("velocity_gap_max", {})).fillna(0)
-        df["card_max_weekly_txn"] = card_str5.map(state.get("card_max_weekly_txn", {})).fillna(0)
-        df["card_mean_weekly_txn"] = card_str5.map(state.get("card_mean_weekly_txn", {})).fillna(0)
-        # Ratio: max weekly vs mean weekly (spiky vs consistent)
-        df["weekly_spikiness"] = df["card_max_weekly_txn"] / (df["card_mean_weekly_txn"].clip(lower=0.1))
+    # Frequency encoding for remaining categoricals
+    for col in state.get("cat_cols", []):
+        if col in df.columns:
+            freq_map = state.get(f"{col}_freq", {})
+            df[f"{col}_freq_enc"] = df[col].apply(lambda x: freq_map.get(str(x), 0.0))
+            df = df.drop(columns=[col])
 
-    df = df.fillna(-1)
-    return df
+    # --- Interaction features (keep only strongest, drop weak zscore_x_dist) ---
+    if "is_night" in df.columns and "home_merch_dist" in df.columns:
+        df["night_x_dist"] = df["is_night"] * df["home_merch_dist"]
+    if "category_te" in df.columns and "amt_zscore_card" in df.columns:
+        df["cate_te_x_zscore"] = df["category_te"] * df["amt_zscore_card"]
+    # Drop log_home_merch_dist (correlated with home_merch_dist)
+
+    return df.fillna(-1)

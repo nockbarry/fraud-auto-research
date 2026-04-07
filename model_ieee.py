@@ -1,56 +1,34 @@
-"""Model training for IEEE-CIS dataset. Edited by the agent.
-
-The harness calls train_and_evaluate(). Return predictions for val and OOT.
-GPU is auto-detected and used when available.
-"""
-
-import numpy as np
+"""Model for IEEE-CIS dataset. Agent-editable."""
 import xgboost as xgb
-
 from harness.utils import get_gpu_info
 
 
 def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
-    """Train model and return predictions."""
     gpu = get_gpu_info()
-    pos = y_train.sum()
-    neg = len(y_train) - pos
-    scale_pos_weight = neg / pos if pos > 0 else 1.0
-
-    # Moderate downscaling of class weight
-    scale_pos_weight_adj = scale_pos_weight ** 0.6  # ~9.5
-
+    pos = int(y_train.sum())
+    neg = int(len(y_train) - pos)
     model = xgb.XGBClassifier(
-        n_estimators=2000,
-        max_depth=7,
-        learning_rate=0.02,
+        n_estimators=4000,
+        max_depth=8,
+        learning_rate=0.01,
+        scale_pos_weight=neg / max(pos, 1),
         subsample=0.8,
         colsample_bytree=0.7,
-        colsample_bylevel=0.8,
-        min_child_weight=10,
+        colsample_bylevel=0.9,
+        min_child_weight=5,
         gamma=0.1,
         reg_alpha=0.05,
         reg_lambda=1.5,
-        scale_pos_weight=scale_pos_weight_adj,
         tree_method=gpu["tree_method"],
         device=gpu["device"],
         eval_metric="aucpr",
-        early_stopping_rounds=75,
+        early_stopping_rounds=200,
         random_state=42,
     )
-
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-
-    y_val_pred = model.predict_proba(X_val)[:, 1]
-    y_oot_pred = model.predict_proba(X_oot)[:, 1]
-
     return {
-        "y_val_pred": y_val_pred,
-        "y_oot_pred": y_oot_pred,
+        "y_val_pred": model.predict_proba(X_val)[:, 1],
+        "y_oot_pred": model.predict_proba(X_oot)[:, 1],
         "model": model,
-        "train_info": {
-            "n_estimators_used": model.best_iteration,
-            "scale_pos_weight": round(scale_pos_weight_adj, 2),
-            "device": gpu["device"],
-        },
+        "train_info": {"n_estimators_used": model.best_iteration, "device": gpu["device"]},
     }

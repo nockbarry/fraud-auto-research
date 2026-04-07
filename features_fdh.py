@@ -1,190 +1,187 @@
-"""Feature transforms for FDH (Fraud Detection Handbook) dataset. Edited by the agent.
+"""Feature engineering for FDH dataset. Agent-editable.
 
-Exp_011: Focused minimal feature set — keep only features with proven importance.
-Strategy: start from exp_008 SOTA but remove low-importance features
-to see if reduction improves OOT generalization.
-
-Key features to keep (from exp_008 top features):
-1. term_fraud_rate (0.39)
-2. is_large_for_cust (0.19)
-3. amount_vs_cust_median_ratio (0.16)
-4. term_fr_28d (0.09)
-5. amount_cust_zscore (0.04)
-6. amount_vs_cust_mean (0.02)
-7. cust_std_amt (0.02)
-8. tx_time_days_num (0.02)
-9. term_fr_14d (0.01)
-10. term_fr_7d (0.01)
-+ others that may add incremental value
-
-Remove: low-importance velocity stats that don't appear in top 10
+Fit/transform API:
+  fit(df_train, y_train, config) -> state dict (JSON-serializable)
+  transform(df, state, config)   -> df (all numeric, no labels)
 """
-
 import numpy as np
 import pandas as pd
 
 
 def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
-    """Fit feature state on training data. Return JSON-serializable dict."""
-    df = df_train.copy()
-    df["label"] = y_train.values
+    """Fit on training data only. Returns JSON-serializable state."""
+    state: dict = {}
+    state["global_mean"] = float(y_train.mean())
 
-    global_mean_amt = float(df["TX_AMOUNT"].mean())
-    global_std_amt = float(df["TX_AMOUNT"].std())
-    global_fraud_rate = float(y_train.mean())
+    # Drop columns with >50% NaN
+    nan_rates = df_train.isnull().mean()
+    state["drop_cols"] = nan_rates[nan_rates > 0.50].index.tolist()
+    df_tmp = df_train.drop(columns=state["drop_cols"], errors="ignore")
 
-    # ── Customer stats ────────────────────────────────────────────────────────
-    cust_stats = df.groupby("CUSTOMER_ID")["TX_AMOUNT"].agg(
-        ["mean", "std", "count", "median"]
-    ).reset_index()
-    cust_stats.columns = ["CUSTOMER_ID", "cust_mean_amt", "cust_std_amt", "cust_tx_count", "cust_median_amt"]
-    cust_stats["cust_std_amt"] = cust_stats["cust_std_amt"].fillna(1.0).clip(lower=0.1)
+    # ----- Customer behavioral profiling -----
+    cust_stats = (
+        df_tmp.groupby("CUSTOMER_ID")["TX_AMOUNT"]
+        .agg(["mean", "std", "median", "max", "count"])
+        .reset_index()
+    )
+    cust_stats.columns = ["CUSTOMER_ID", "cust_mean_amt", "cust_std_amt",
+                          "cust_median_amt", "cust_max_amt", "cust_tx_count"]
 
-    cust_p10_amt = df.groupby("CUSTOMER_ID")["TX_AMOUNT"].quantile(0.10).to_dict()
-    cust_p90_amt = df.groupby("CUSTOMER_ID")["TX_AMOUNT"].quantile(0.90).to_dict()
-    cust_unique_terminals = df.groupby("CUSTOMER_ID")["TERMINAL_ID"].nunique().to_dict()
+    cust_p90 = (
+        df_tmp.groupby("CUSTOMER_ID")["TX_AMOUNT"]
+        .quantile(0.90)
+        .reset_index()
+        .rename(columns={"TX_AMOUNT": "cust_p90_amt"})
+    )
+    cust_stats = cust_stats.merge(cust_p90, on="CUSTOMER_ID", how="left")
 
-    # Customer velocity stats
-    df_cs = df.sort_values(["CUSTOMER_ID", "TX_TIME_SECONDS"])
-    df_cs["_gap"] = df_cs.groupby("CUSTOMER_ID")["TX_TIME_SECONDS"].diff()
-    cust_gap_median = df_cs.groupby("CUSTOMER_ID")["_gap"].median().fillna(86400).to_dict()
-    cust_gap_min = df_cs.groupby("CUSTOMER_ID")["_gap"].min().fillna(86400).to_dict()
-    df_cs["_is_burst"] = (df_cs["_gap"] < 300).astype(int)
-    cust_burst = df_cs.groupby("CUSTOMER_ID")["_is_burst"].sum().to_dict()
-    train_days = float((df["TX_TIME_SECONDS"].max() - df["TX_TIME_SECONDS"].min()) / 86400)
-    train_days = max(train_days, 1.0)
-    cust_daily_rate = (df.groupby("CUSTOMER_ID")["TRANSACTION_ID"].count() / train_days).to_dict()
+    if "TX_TIME_DAYS" in df_tmp.columns:
+        day_span = df_tmp.groupby("CUSTOMER_ID")["TX_TIME_DAYS"].agg(lambda x: max(x.max() - x.min(), 1))
+        day_span = day_span.reset_index().rename(columns={"TX_TIME_DAYS": "cust_day_span"})
+        cust_stats = cust_stats.merge(day_span, on="CUSTOMER_ID", how="left")
+        cust_stats["cust_daily_rate"] = cust_stats["cust_tx_count"] / cust_stats["cust_day_span"].clip(lower=1)
+    else:
+        cust_stats["cust_daily_rate"] = np.nan
 
-    # ── Terminal stats ────────────────────────────────────────────────────────
-    term_stats = df.groupby("TERMINAL_ID").agg(
-        term_fraud_rate=("label", "mean"),
-        term_tx_count=("TRANSACTION_ID", "count"),
-        term_mean_amt=("TX_AMOUNT", "mean"),
-    ).reset_index()
+    for col in ["cust_mean_amt", "cust_std_amt", "cust_median_amt",
+                "cust_max_amt", "cust_tx_count", "cust_p90_amt", "cust_daily_rate"]:
+        state[col] = {str(k): float(v) for k, v in zip(cust_stats["CUSTOMER_ID"], cust_stats[col])}
 
-    # Terminal multi-window fraud rates
-    train_max_time = float(df["TX_TIME_SECONDS"].max())
-    term_window_fraud = {}
-    for wd in [7, 14, 28]:
-        df_w = df[df["TX_TIME_SECONDS"] >= train_max_time - wd * 86400]
-        stats_w = df_w.groupby("TERMINAL_ID").agg(
-            fr=("label", "mean"), cnt=("TRANSACTION_ID", "count")
-        )
-        min_s = 20
-        stats_w["fr_s"] = (
-            stats_w["cnt"] / (stats_w["cnt"] + min_s) * stats_w["fr"]
-            + min_s / (stats_w["cnt"] + min_s) * global_fraud_rate
-        )
-        term_window_fraud[f"term_fr_{wd}d"] = {str(k): float(v) for k, v in stats_w["fr_s"].items()}
-
-    # Customer-terminal visit count
-    cust_term_counts = df.groupby(["CUSTOMER_ID", "TERMINAL_ID"]).size()
-    cust_term_count_dict = {f"{k[0]}_{k[1]}": int(v) for k, v in cust_term_counts.items()}
-
-    return {
-        "cust_mean_amt": {str(k): float(v) for k, v in cust_stats.set_index("CUSTOMER_ID")["cust_mean_amt"].items()},
-        "cust_std_amt": {str(k): float(v) for k, v in cust_stats.set_index("CUSTOMER_ID")["cust_std_amt"].items()},
-        "cust_count": {str(k): int(v) for k, v in cust_stats.set_index("CUSTOMER_ID")["cust_tx_count"].items()},
-        "cust_median_amt": {str(k): float(v) for k, v in cust_stats.set_index("CUSTOMER_ID")["cust_median_amt"].items()},
-        "cust_p10_amt": {str(k): float(v) for k, v in cust_p10_amt.items()},
-        "cust_p90_amt": {str(k): float(v) for k, v in cust_p90_amt.items()},
-        "cust_unique_terminals": {str(k): int(v) for k, v in cust_unique_terminals.items()},
-        "cust_median_gap": {str(k): float(v) for k, v in cust_gap_median.items()},
-        "cust_min_gap": {str(k): float(v) for k, v in cust_gap_min.items()},
-        "cust_burst_count": {str(k): int(v) for k, v in cust_burst.items()},
-        "cust_daily_rate": {str(k): float(v) for k, v in cust_daily_rate.items()},
-        "term_fraud_rate": {str(k): float(v) for k, v in term_stats.set_index("TERMINAL_ID")["term_fraud_rate"].items()},
-        "term_tx_count": {str(k): int(v) for k, v in term_stats.set_index("TERMINAL_ID")["term_tx_count"].items()},
-        "term_mean_amt": {str(k): float(v) for k, v in term_stats.set_index("TERMINAL_ID")["term_mean_amt"].items()},
-        "term_fr_7d": term_window_fraud["term_fr_7d"],
-        "term_fr_14d": term_window_fraud["term_fr_14d"],
-        "term_fr_28d": term_window_fraud["term_fr_28d"],
-        "cust_term_count_dict": cust_term_count_dict,
-        "global_mean_amt": global_mean_amt,
-        "global_std_amt": global_std_amt,
-        "global_fraud_rate": global_fraud_rate,
+    state["cust_defaults"] = {
+        "cust_mean_amt": float(df_tmp["TX_AMOUNT"].mean()),
+        "cust_std_amt": float(df_tmp["TX_AMOUNT"].std()),
+        "cust_median_amt": float(df_tmp["TX_AMOUNT"].median()),
+        "cust_max_amt": float(df_tmp["TX_AMOUNT"].max()),
+        "cust_tx_count": 1.0,
+        "cust_p90_amt": float(df_tmp["TX_AMOUNT"].quantile(0.90)),
+        "cust_daily_rate": float(cust_stats["cust_daily_rate"].median()),
     }
+
+    # ----- Terminal amount profile -----
+    term_amt = (
+        df_tmp.groupby("TERMINAL_ID")["TX_AMOUNT"]
+        .agg(["mean", "std", "median"])
+        .reset_index()
+    )
+    term_amt.columns = ["TERMINAL_ID", "term_mean_amt", "term_std_amt", "term_median_amt"]
+
+    for col in ["term_mean_amt", "term_std_amt", "term_median_amt"]:
+        state[col] = {str(k): float(v) for k, v in zip(term_amt["TERMINAL_ID"], term_amt[col])}
+
+    state["term_defaults"] = {
+        "term_mean_amt": float(df_tmp["TX_AMOUNT"].mean()),
+        "term_std_amt": float(df_tmp["TX_AMOUNT"].std()),
+        "term_median_amt": float(df_tmp["TX_AMOUNT"].median()),
+    }
+
+    # ----- Customer-terminal diversity -----
+    cust_unique_terms = (
+        df_tmp.groupby("CUSTOMER_ID")["TERMINAL_ID"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"TERMINAL_ID": "cust_unique_terminals"})
+    )
+    state["cust_unique_terminals"] = {
+        str(k): float(v)
+        for k, v in zip(cust_unique_terms["CUSTOMER_ID"], cust_unique_terms["cust_unique_terminals"])
+    }
+    state["cust_unique_terminals_default"] = float(cust_unique_terms["cust_unique_terminals"].median())
+
+    # ----- Terminal amount Q25/Q75 -----
+    term_q75 = df_tmp.groupby("TERMINAL_ID")["TX_AMOUNT"].quantile(0.75).reset_index()
+    term_q75.columns = ["TERMINAL_ID", "term_q75_amt"]
+    term_q25 = df_tmp.groupby("TERMINAL_ID")["TX_AMOUNT"].quantile(0.25).reset_index()
+    term_q25.columns = ["TERMINAL_ID", "term_q25_amt"]
+
+    state["term_q75_amt"] = {str(k): float(v) for k, v in zip(term_q75["TERMINAL_ID"], term_q75["term_q75_amt"])}
+    state["term_q25_amt"] = {str(k): float(v) for k, v in zip(term_q25["TERMINAL_ID"], term_q25["term_q25_amt"])}
+    state["term_q75_default"] = float(df_tmp["TX_AMOUNT"].quantile(0.75))
+    state["term_q25_default"] = float(df_tmp["TX_AMOUNT"].quantile(0.25))
+
+    return state
 
 
 def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
-    """Apply feature transforms. No label access."""
+    """Transform without labels. Apply fitted state."""
     df = df.copy()
+    df = df.drop(columns=state.get("drop_cols", []), errors="ignore")
 
-    global_mean = state["global_mean_amt"]
-    global_std = max(state["global_std_amt"], 0.01)
-    global_fr = state["global_fraud_rate"]
+    # Convert any datetime columns to unix seconds
+    for col in df.select_dtypes(include=["datetime64"]).columns:
+        df[col] = df[col].astype("int64") // 10**9
 
-    # ── Time features ─────────────────────────────────────────────────────────
-    dt = pd.to_datetime(df["TX_DATETIME"])
-    df["hour"] = dt.dt.hour
-    df["day_of_week"] = dt.dt.dayofweek
-    df["is_weekend"] = (dt.dt.dayofweek >= 5).astype(np.int8)
-    df["is_night"] = ((dt.dt.hour < 6) | (dt.dt.hour >= 22)).astype(np.int8)
-    df["tx_time_days_num"] = pd.to_numeric(df["TX_TIME_DAYS"], errors="coerce").fillna(0)
+    # Drop raw ID columns — no signal, high PSI
+    df = df.drop(columns=["TRANSACTION_ID"], errors="ignore")
 
-    # ── Amount features ───────────────────────────────────────────────────────
+    # ----- Amount features -----
     df["log_amount"] = np.log1p(df["TX_AMOUNT"])
-    df["amount_global_zscore"] = (df["TX_AMOUNT"] - global_mean) / global_std
+    df["is_round"] = (df["TX_AMOUNT"] % 1 == 0).astype(float)
+    df["is_small"] = (df["TX_AMOUNT"] < 20).astype(float)
 
-    # ── Customer behavioral deviation ─────────────────────────────────────────
-    cust_mean = state["cust_mean_amt"]
-    cust_std = state["cust_std_amt"]
-    cust_count = state["cust_count"]
-    cust_median = state["cust_median_amt"]
-    cust_p10 = state["cust_p10_amt"]
-    cust_p90 = state["cust_p90_amt"]
-    cust_unique_terms = state["cust_unique_terminals"]
+    # ----- Time features (cyclic, stable across splits) -----
+    if "TX_DATETIME" in df.columns:
+        tx_ts = df["TX_DATETIME"].astype(float)
+        hour = (tx_ts % 86400) / 3600
+        df["tx_hour_sin"] = np.sin(2 * np.pi * hour / 24)
+        df["tx_hour_cos"] = np.cos(2 * np.pi * hour / 24)
+        dow = (tx_ts // 86400) % 7
+        df["tx_dow_sin"] = np.sin(2 * np.pi * dow / 7)
+        df["tx_dow_cos"] = np.cos(2 * np.pi * dow / 7)
+        df["is_night"] = ((hour >= 22) | (hour < 6)).astype(float)
 
-    df["cust_mean_amt"] = df["CUSTOMER_ID"].map(lambda x: float(cust_mean.get(str(x), global_mean)))
-    df["cust_std_amt"] = df["CUSTOMER_ID"].map(lambda x: float(cust_std.get(str(x), global_std)))
-    df["cust_tx_count"] = df["CUSTOMER_ID"].map(lambda x: float(cust_count.get(str(x), 0)))
-    df["cust_median_amt"] = df["CUSTOMER_ID"].map(lambda x: float(cust_median.get(str(x), global_mean)))
+    # ----- Customer behavioral features -----
+    defaults = state.get("cust_defaults", {})
+    cust_str = df["CUSTOMER_ID"].astype(str)
+    for col in ["cust_mean_amt", "cust_std_amt", "cust_median_amt",
+                "cust_max_amt", "cust_tx_count", "cust_p90_amt", "cust_daily_rate"]:
+        mapping = state.get(col, {})
+        default_val = defaults.get(col, 0.0)
+        df[col] = cust_str.apply(lambda x: mapping.get(x, default_val))
 
-    df["amount_vs_cust_mean"] = df["TX_AMOUNT"] - df["cust_mean_amt"]
-    df["amount_cust_zscore"] = df["amount_vs_cust_mean"] / df["cust_std_amt"]
-    df["amount_vs_cust_median_ratio"] = df["TX_AMOUNT"] / (df["cust_median_amt"] + 0.01)
-    df["log_cust_tx_count"] = np.log1p(df["cust_tx_count"])
+    std_safe = df["cust_std_amt"].clip(lower=0.01)
+    df["amt_zscore_cust"] = (df["TX_AMOUNT"] - df["cust_mean_amt"]) / std_safe
+    df["amt_vs_p90"] = df["TX_AMOUNT"] / df["cust_p90_amt"].clip(lower=0.01)
 
-    df["is_small_for_cust"] = (df["TX_AMOUNT"] <= df["CUSTOMER_ID"].map(
-        lambda x: float(cust_p10.get(str(x), 0)))).astype(np.int8)
-    df["is_large_for_cust"] = (df["TX_AMOUNT"] >= df["CUSTOMER_ID"].map(
-        lambda x: float(cust_p90.get(str(x), global_mean * 2)))).astype(np.int8)
+    # ----- Terminal amount features -----
+    term_defaults = state.get("term_defaults", {})
+    term_str = df["TERMINAL_ID"].astype(str)
+    for col in ["term_mean_amt", "term_std_amt", "term_median_amt"]:
+        mapping = state.get(col, {})
+        default_val = term_defaults.get(col, 0.0)
+        df[col] = term_str.apply(lambda x: mapping.get(x, default_val))
 
-    df["log_cust_unique_terminals"] = np.log1p(df["CUSTOMER_ID"].map(
-        lambda x: float(cust_unique_terms.get(str(x), 0))))
-    df["log_cust_median_gap"] = np.log1p(df["CUSTOMER_ID"].map(
-        lambda x: float(state["cust_median_gap"].get(str(x), 86400))))
-    df["log_cust_min_gap"] = np.log1p(df["CUSTOMER_ID"].map(
-        lambda x: float(state["cust_min_gap"].get(str(x), 86400))))
-    df["log_cust_burst_count"] = np.log1p(df["CUSTOMER_ID"].map(
-        lambda x: float(state["cust_burst_count"].get(str(x), 0))))
-    df["log_cust_daily_rate"] = np.log1p(df["CUSTOMER_ID"].map(
-        lambda x: float(state["cust_daily_rate"].get(str(x), 1.0))))
+    term_std_safe = df["term_std_amt"].clip(lower=0.01)
+    df["amt_zscore_term"] = (df["TX_AMOUNT"] - df["term_mean_amt"]) / term_std_safe
+    df["amt_vs_term_median"] = df["TX_AMOUNT"] / df["term_median_amt"].clip(lower=0.01)
 
-    # ── Terminal risk features ────────────────────────────────────────────────
-    term_fraud = state["term_fraud_rate"]
-    term_count = state["term_tx_count"]
-    term_mean = state["term_mean_amt"]
+    # Q75 of terminal (for above-iqr flag)
+    q75_map = state.get("term_q75_amt", {})
+    q75_default = state.get("term_q75_default", 100.0)
+    df["term_q75_amt"] = term_str.apply(lambda x: q75_map.get(x, q75_default))
+    df["amt_above_term_q75"] = (df["TX_AMOUNT"] - df["term_q75_amt"]).clip(lower=0)
 
-    df["term_fraud_rate"] = df["TERMINAL_ID"].map(lambda x: float(term_fraud.get(str(x), global_fr)))
-    df["term_tx_count"] = df["TERMINAL_ID"].map(lambda x: float(term_count.get(str(x), 0)))
-    df["term_mean_amt"] = df["TERMINAL_ID"].map(lambda x: float(term_mean.get(str(x), global_mean)))
-    df["log_term_tx_count"] = np.log1p(df["term_tx_count"])
-    df["amount_vs_term_mean"] = df["TX_AMOUNT"] - df["term_mean_amt"]
+    # ----- Customer-terminal diversity -----
+    cut_map = state.get("cust_unique_terminals", {})
+    cut_default = state.get("cust_unique_terminals_default", 1.0)
+    df["cust_unique_terminals"] = cust_str.apply(lambda x: cut_map.get(x, cut_default))
+    df["cust_term_diversity"] = df["cust_unique_terminals"] / df["cust_tx_count"].clip(lower=1)
 
-    for wd in [7, 14, 28]:
-        key = f"term_fr_{wd}d"
-        df[key] = df["TERMINAL_ID"].map(lambda x, k=key: float(state[k].get(str(x), global_fr)))
+    # ----- Interaction features (KEY: captures multi-scenario fingerprints) -----
+    # High customer amount vs p90 AND high terminal amount variance = scenario 2 fingerprint
+    df["amt_vs_p90_x_term_std"] = df["amt_vs_p90"].clip(0, 20) * np.log1p(df["term_std_amt"])
 
-    # ── Customer-terminal novelty (vectorized) ────────────────────────────────
-    cust_term_count_dict = state.get("cust_term_count_dict", {})
-    ct_key = df["CUSTOMER_ID"].astype(str) + "_" + df["TERMINAL_ID"].astype(str)
-    df["cust_term_visit_count"] = ct_key.map(lambda k: float(cust_term_count_dict.get(k, 0)))
-    df["is_new_terminal"] = (df["cust_term_visit_count"] == 0).astype(np.int8)
+    # Double anomaly: simultaneously anomalous for customer AND terminal
+    df["double_anomaly"] = (
+        df["amt_vs_p90"].clip(0, 20) * df["amt_zscore_term"].clip(-5, 20)
+    )
 
-    # ── Drop raw string/datetime columns ──────────────────────────────────────
-    drop_cols = ["TX_DATETIME", "CUSTOMER_ID", "TERMINAL_ID", "TRANSACTION_ID",
-                 "TX_TIME_SECONDS", "TX_TIME_DAYS"]
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    # High amount vs customer p90 AND above terminal Q75 = even more suspicious
+    df["amt_vs_p90_x_above_q75"] = df["amt_vs_p90"].clip(0, 20) * np.log1p(df["amt_above_term_q75"])
 
-    return df
+    # Drop raw CUSTOMER_ID and TERMINAL_ID
+    df = df.drop(columns=["CUSTOMER_ID", "TERMINAL_ID"], errors="ignore")
+
+    # Drop high-PSI time index columns
+    df = df.drop(columns=["TX_TIME_DAYS", "TX_DATETIME", "TX_TIME_SECONDS"], errors="ignore")
+
+    return df.fillna(-1)
