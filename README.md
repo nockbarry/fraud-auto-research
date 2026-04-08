@@ -10,13 +10,18 @@ Autonomous feature engineering and model evaluation for transaction fraud monito
 
 | Dataset | Experiments | Best AUPRC (val) | Best AUPRC (OOT) |
 |---------|-------------|-----------------|-----------------|
-| fraud-sim | 21 | 0.6710 | 0.6912 |
-| ieee-cis | 14 | 0.3091 | 0.2086 |
-| fdh | 26 | 0.3522 | 0.2441 |
+| ieee-cis (Track A) | 22+ | 0.3361 | 0.2643 |
+| ieee-cis-fresh (Track B) | 7+ | 0.3213 | 0.2455 |
+| fraud-sim | 11 | 0.9489 | 0.9496 |
+| fdh | 12 | 0.3798 | 0.2933 |
 
-![Fraud-Sim results](reports/plot_fraud-sim.png)
+Both IEEE-CIS tracks are actively running in parallel. Track A continues from a prior 15-experiment run; Track B starts fresh from the same baseline so the agent independently rediscovers the key unlocks.
 
-Plots show five panels: Composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, PSI. Green ● line = val (drives keep/discard). Sky blue ◆ = OOT held-out (one point per experiment). Red ✕ = discarded.
+**Key finding from the most recent IEEE-CIS run:** A blanket `nan_rates > 0.50` drop in the baseline feature file was eliminating all 43 identity columns (`id_01`–`id_38`, `DeviceInfo`, `R_emaildomain`). These columns have 74–86% NaN but their *null pattern* (null_AUC ≈ 0.65) is the dataset's strongest single signal. Fixing the drop threshold moved AUPRC_val from 0.207 → 0.336 before any feature engineering.
+
+![IEEE-CIS Track A results](reports/plot_ieee-cis.png)
+
+Plots show five panels: Composite score (val), AUPRC (val line + OOT diamonds), AUROC, Precision@80% Recall, PSI. Green ● = val (drives keep/discard). Sky blue ◆ = OOT held-out. Red ✕ = discarded.
 
 ---
 
@@ -57,7 +62,7 @@ The operator adapts the system to a specific fraud problem:
 4. **Update `recipes.md`** — add domain-specific feature patterns the agent can reference
 5. **Update `program.md`** if needed — the agent's instruction file with domain context and strategy guidance
 
-**The harness (`harness/`) is never modified.** It is the fixed measurement apparatus. The agent is explicitly told not to touch it.
+**The harness (`harness/`) is never modified by the agent.** It is the fixed measurement apparatus.
 
 ### Phase 2 — Agent Iteration (runs overnight, autonomously)
 
@@ -65,16 +70,18 @@ The agent loops:
 
 ```
 LOOP FOREVER:
+  0. Read column analysis (univariate IV / null-flag AUC per raw column)
   1. Read experiment context (SOTA, technique success rates, untried approaches)
-  2. Propose hypothesis ("merchant x category amount corridor features")
+     + agent journal (thesis, active campaign, lessons learned)
+  2. Propose hypothesis linked to a multi-step campaign
   3. Edit features_{dataset}.py and/or model_{dataset}.py
   4. Run: python3 -m harness.evaluate --config configs/{dataset}.yaml \
-           --save --hypothesis "your hypothesis"
+           --save --hypothesis "step X/Y: your hypothesis"
   5. Harness evaluates, auto-determines keep/discard vs SOTA, saves snapshot
-  6. Read top_features, auprc_ci, status — inform next iteration
+  6. Update journal, append lesson, advance campaign step
 ```
 
-Each iteration is 30–180 seconds (GPU-accelerated). The agent runs 40+ experiments per session with no human involvement.
+Each iteration is 30–180 seconds (GPU-accelerated). The agent runs 20–40+ experiments per session with no human involvement.
 
 ---
 
@@ -84,50 +91,68 @@ Each iteration is 30–180 seconds (GPU-accelerated). The agent runs 40+ experim
 fraud-auto-research/
 │
 ├── program.md              # Agent instruction file — scope, loop, anti-patterns
-├── recipes.md              # Feature engineering patterns (copy-paste fit/transform code)
+├── recipes.md              # Feature engineering patterns (19 recipes, including ambitious
+│                           #   compound moves: UID construction, velocity stacks, rolling
+│                           #   terminal fraud rates, behavioral fingerprints)
 ├── fraud_practices.md      # SOTA fraud knowledge bank — datasets, fraud types, feature recipes
 │
 ├── configs/
-│   ├── ieee-cis.yaml       # IEEE-CIS config + dataset_profile
-│   ├── fraud-sim.yaml      # Fraud-sim config + dataset_profile
-│   └── fdh.yaml            # FDH config + dataset_profile
+│   ├── ieee-cis.yaml       # Track A: continuing run
+│   ├── ieee-cis-fresh.yaml # Track B: fresh parallel run on same data
+│   ├── fraud-sim.yaml
+│   └── fdh.yaml
 │
-├── features_ieee.py        # AGENT-EDITABLE — IEEE-CIS feature transforms
+├── features_ieee.py        # AGENT-EDITABLE — IEEE-CIS Track A feature transforms
+├── features_ieee_fresh.py  # AGENT-EDITABLE — IEEE-CIS Track B feature transforms
 ├── features_sim.py         # AGENT-EDITABLE — fraud-sim feature transforms
 ├── features_fdh.py         # AGENT-EDITABLE — FDH feature transforms
-├── model_ieee.py           # AGENT-EDITABLE — IEEE-CIS model definition
-├── model_sim.py            # AGENT-EDITABLE — fraud-sim model definition
-├── model_fdh.py            # AGENT-EDITABLE — FDH model definition
+├── model_ieee.py           # AGENT-EDITABLE — IEEE-CIS Track A model definition
+├── model_ieee_fresh.py     # AGENT-EDITABLE — IEEE-CIS Track B model definition
+├── model_sim.py            # AGENT-EDITABLE — fraud-sim model
+├── model_fdh.py            # AGENT-EDITABLE — FDH model
+│
+├── journal_ieee-cis.md     # Agent's own notes for Track A (thesis, campaign, lessons)
+├── journal_ieee-cis-fresh.md  # Agent's own notes for Track B
+├── journal_fraud-sim.md    # Agent's notes for fraud-sim
+├── journal_fdh.md          # Agent's notes for FDH
 │
 ├── harness/                # READ-ONLY — the fixed measurement apparatus
 │   ├── evaluate.py         # Pipeline: load → fit → transform → validate → train → metrics
+│   │                       #   Step 1b: auto-computes raw column analysis on first run
+│   │                       #   Step 6b: computes transformed-feature analysis after each keep
+│   ├── column_analysis.py  # Per-column univariate IV / AUC / null-flag predictivity
+│   │                       #   Cached at experiments/{dataset}/column_analysis.json
 │   ├── experiment_tracker.py  # Directory-per-experiment, SOTA symlinks, index.jsonl
-│   ├── context.py          # Agent memory: SOTA, history, success rates, recommendations
+│   ├── context.py          # Agent memory: journal, column analysis, SOTA, history,
+│   │                       #   campaign tracking, technique success rates, recommendations
 │   ├── dashboard.py        # Self-contained HTML dashboard (plots embedded as base64)
+│   │                       #   Supports display-name overrides for parallel tracks
 │   ├── plot_results.py     # Per-dataset annotated metric plots
 │   ├── data_loader.py      # Parquet loading, train/val/OOT splitting
 │   ├── validate_features.py   # NaN rates, schema alignment, count limits, string checks
 │   ├── feature_analysis.py    # IV, PSI per feature, correlation matrix
 │   └── utils.py            # Config loader, GPU detection, file hashing
 │
-├── experiments/            # Auto-generated — never committed
+├── experiments/            # Auto-generated — gitignored
 │   └── ieee-cis/
 │       ├── exp_000_.../
-│       │   ├── features.py   # Code snapshot
-│       │   ├── model.py      # Code snapshot
+│       │   ├── features.py   # Code snapshot at time of experiment
+│       │   ├── model.py
 │       │   ├── metrics.json  # AUPRC, precision, PSI, CIs, feature importances
 │       │   └── metadata.json # Hypothesis, status, timestamp, parent
+│       ├── column_analysis.json  # Cached univariate analysis (raw + transformed)
 │       ├── index.jsonl       # Append-only log
 │       └── sota -> exp_NNN_  # Symlink to current best
 │
-├── data/                   # Source parquet files (not in repo)
+├── data/                   # Source parquet files — gitignored
 │   ├── ieee-cis/
 │   ├── fraud-sim/
 │   └── fdh/
 │
-└── reports/                # Regenerated after each experiment — committed to repo
-    ├── dashboard.html      # Self-contained (plots embedded as base64, works via file://)
+└── reports/                # Regenerated after each experiment — committed
+    ├── dashboard.html      # Self-contained (plots embedded as base64)
     ├── plot_ieee-cis.png
+    ├── plot_ieee-cis-fresh.png
     ├── plot_fraud-sim.png
     └── plot_fdh.png
 ```
@@ -156,31 +181,86 @@ The harness strips labels before calling `transform()`. A leakage detector flags
 ### Composite score
 
 ```
-composite_score = 0.50 × AUPRC_val + 0.30 × Precision@Recall_val(80%) − 0.20 × PSI_penalty
+composite_score = 0.50 × AUPRC_val
+                + 0.25 × Precision@Recall_val(80%)
+                − 0.10 × PSI_penalty(val↔OOT)
+                − 0.05 × train_val_PSI_penalty
+                − 0.05 × CI_width_penalty
+                − 0.05 × AUROC_gap_penalty
 ```
 
-**Keep/discard decisions are made on val.** OOT (out-of-time holdout) is never used for selection — it is purely a generalization check reported alongside. This prevents the agent from implicitly overfitting to the holdout set over many iterations.
+**Keep/discard decisions are made on val.** OOT (out-of-time holdout) is never used for selection — it is purely a generalization check. PSI hard-reject at ≥ 0.25.
 
-PSI (Population Stability Index) between val and OOT score distributions penalizes instability — hard-reject at PSI ≥ 0.25.
+### Per-column univariate analysis (`harness/column_analysis.py`)
+
+Before any feature engineering, the harness automatically computes per-column predictivity:
+
+- **Information Value (IV)** with WoE binning — grades: `LEAK?` / `high_card` / `strong` / `medium` / `weak` / `none`
+- **Univariate AUC** — how well the raw column alone distinguishes fraud
+- **Null-flag AUC** — whether the *absence* of the column is itself predictive (critical for identity clusters with 70–90% NaN)
+
+Cached at `experiments/{dataset}/column_analysis.json`. Surfaced at the top of every context dump so the agent sees what raw signals exist before any feature engineering. The "Do NOT blanket-drop columns by NaN rate" rule is backed by this analysis — in IEEE-CIS, all 43 identity columns have 74–99% NaN but null_AUC ≈ 0.65.
+
+```bash
+python3 -m harness.column_analysis ieee-cis --show     # print cached analysis
+python3 -m harness.column_analysis ieee-cis --refresh  # force recompute
+```
+
+### Per-dataset agent journals (`journal_{dataset}.md`)
+
+Each dataset has a markdown journal the agent maintains across experiments:
+
+```markdown
+## Current Thesis      — what signal is dominant and why
+## Active Campaign     — 3-5 planned steps with status (planned/running/done/failed)
+## Open Questions      — hypotheses not yet tested
+## Lessons Learned     — append-only, max 20, one line per experiment
+## Discarded Theses    — graveyard for disproven approaches, max 5
+```
+
+The journal is injected at the top of every context dump (before SOTA metrics) so the agent confronts its own reasoning before numbers distract it. The "abandon after 3 consecutive losses > 0.005 composite" rule prevents single-failure panic; the journal's "Active Campaign" makes multi-step progress visible.
 
 ### Experiment tracking
 
 Every experiment — kept or discarded — is saved as a directory with code snapshots and metrics. A `sota` symlink always points to the current best. Nothing is ever lost.
+
+```
+experiments/ieee-cis/
+  exp_000_baseline/        ← all snapshots kept forever
+  exp_014_velocity_stack/  ← SOTA (also under sota/ symlink)
+  index.jsonl              ← append-only timeline
+```
+
+If an experiment crashes and corrupts the working `features_{dataset}.py`, restore from the SOTA snapshot:
+```bash
+cp experiments/ieee-cis/sota/features.py features_ieee.py
+```
 
 ### Structured agent context
 
 After every `--save` run, the harness prints a context block the agent uses for the next iteration:
 
 ```
-SOTA: exp_011 — AUPRC_val=0.6089 | AUPRC_oot=0.5934 | Composite(val)=0.3966
+AGENT JOURNAL (update before this experiment if stale):
+  ... thesis, campaign steps, lessons ...
+
+RAW COLUMN ANALYSIS (computed at exp #0):
+  column           IV    grade   univ_AUC  null_AUC  NaN%
+  id_17          0.349   strong   0.6319    0.6478*  74.2
+  ...
+
+SOTA: exp_014 — AUPRC_val=0.3361 | Composite=0.1424
+  Top features: ProductCD_te=0.148, id_17=0.098 ...
+
+Active campaign tracking:
+  "uid-aggregation" — 3/4 steps complete
 
 Technique success rates:
-  behavioral     2/5 kept (40%)
-  amount_patterns  2/3 kept (67%)
+  uid_construction  2/2 kept (100%)
+  behavioral        3/7 kept (43%)
+  velocity          1/2 kept (50%)
 
-Untried: anomaly, geo_features, velocity, interaction_te ...
-
-Warning: 3-experiment discard streak — try a different category.
+Untried: anomaly, geo_features, interaction_te ...
 ```
 
 ---
@@ -189,36 +269,21 @@ Warning: 3-experiment discard streak — try a different category.
 
 ### IEEE-CIS Fraud Detection
 
-590K card-not-present transactions from the [Vesta Corporation IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection). The original V1–V339, C1–C14, D1–D15, and M1–M9 derived features are stripped — the agent starts from 55 raw columns: transaction amount, card info, addresses, email domains, device/identity fields, and M-fields (boolean match flags). 3.5% fraud rate, stable OOT. Baseline AUPRC ~0.23.
+590K card-not-present transactions from the [Vesta Corporation IEEE-CIS Kaggle competition](https://www.kaggle.com/c/ieee-fraud-detection). V1–V339 derived features stripped; agent starts from 57 raw columns: transaction amount/time, card info, addresses, email domains, device/identity fields (id_01–38, DeviceType, DeviceInfo), and M-fields (boolean match flags). 3.5% fraud rate, stable OOT.
+
+Two parallel tracks running simultaneously on the same data, independent feature/model files.
 
 ### Fraud-Sim
 
-1.8M simulated credit card transactions from [Sparkov simulation](https://www.kaggle.com/datasets/kartik2112/fraud-detection). 16 raw columns: merchant, category, amount, geographic coordinates, demographics. 0.5% fraud rate with a 42% population shift in OOT — a challenging test for model stability. Baseline AUPRC ~0.51.
+1.8M simulated credit card transactions from [Sparkov simulation](https://www.kaggle.com/datasets/kartik2112/fraud-detection). 16 raw columns: merchant, category, amount, geographic coordinates, demographics. 0.5% fraud rate with a 42% population shift in OOT.
 
 ### FDH (Fraud Detection Handbook)
 
-1.75M simulated card transactions from the [Fraud Detection Handbook](https://github.com/Fraud-Detection-Handbook/simulated-data-raw). Deliberately minimal: only 6 raw columns (CUSTOMER_ID, TERMINAL_ID, TX_DATETIME, TX_AMOUNT, and two derived time fields). All signal must be engineered. Three fraud scenarios: high-amount anomaly, terminal compromise (28-day windows), and card-not-present (many small amounts across many terminals). 0.84% fraud rate. Baseline AUPRC ~0.25 — expected ceiling with good velocity features ~0.80.
+1.75M simulated card transactions from the [Fraud Detection Handbook](https://github.com/Fraud-Detection-Handbook/simulated-data-raw). Deliberately minimal: only 6 raw columns (CUSTOMER_ID, TERMINAL_ID, TX_DATETIME, TX_AMOUNT). All signal must be engineered. Three fraud scenarios: high-amount anomaly, terminal compromise (28-day windows), and card-not-present (many small amounts). 0.84% fraud rate. Expected ceiling ~0.80 AUPRC with good velocity features.
 
 ---
 
 ## Adapting to a New Dataset
-
-### Input Data Model
-
-The parquet files handed to the agent should be **fully-joined, transaction-level DataFrames**:
-
-```
-raw_train.parquet / raw_val.parquet / raw_oot.parquet
-│
-├── Core transaction cols    — amount, timestamp, product/category
-├── Card / account cols      — card ID, account age, card type, issuer
-├── Address cols             — billing addr, shipping addr, match flags
-├── Device cols (optional)   — fingerprint ID, device type, OS, browser
-├── IP cols (optional)       — ip_address, ip_proxy_score, ip_isp
-├── Email cols (optional)    — email domain, email local part, domain age
-├── Vendor cols (optional)   — merchant ID, MCC, merchant_risk_tier
-└── label                    — 0/1 fraud indicator
-```
 
 ### 1. Prepare data
 
@@ -228,6 +293,8 @@ data/my-dataset/
 ├── raw_val.parquet
 └── raw_oot.parquet
 ```
+
+Each parquet file needs a `label` column (0/1) and all feature columns. The harness manages the train/val/OOT split — do not re-split inside feature code.
 
 ### 2. Create config (`configs/my-dataset.yaml`)
 
@@ -245,8 +312,11 @@ metrics:
   target_recall: 0.80
   composite_weights:
     auprc: 0.50
-    precision_at_recall: 0.30
-    psi_penalty: 0.20
+    precision_at_recall: 0.25
+    psi_penalty: 0.10
+    train_val_psi_penalty: 0.05
+    ci_width_penalty: 0.05
+    auroc_gap_penalty: 0.05
   psi_threshold: 0.20
   psi_hard_reject: 0.25
   min_improvement: 0.001
@@ -254,34 +324,48 @@ metrics:
 dataset_profile:
   fraud_rate: 0.01
   n_rows: 500000
-  has_geo: false
   has_identity: true
   population_shift: low
   key_entity_col: "card_id"
+  time_col: "txn_dt"
+  amt_col: "amount"
 ```
 
 ### 3. Write baseline files
 
-**`features_mydataset.py`**:
+**`features_mydataset.py`** — use selective NaN drop (not blanket >50%):
 
 ```python
+import numpy as np
+import pandas as pd
+
 def fit(df_train, y_train, config):
     state = {"global_mean": float(y_train.mean())}
-    cat_cols = df_train.select_dtypes("object").columns.tolist()
+
+    # Selective drop: only remove constant columns or near-empty with no cardinality.
+    # High-NaN columns often carry signal via their null pattern — preserve them.
+    nan_rates = df_train.isnull().mean()
+    n_unique = df_train.nunique(dropna=True)
+    drop_mask = (n_unique <= 1) | ((nan_rates > 0.99) & (n_unique <= 5))
+    state["drop_cols"] = nan_rates[drop_mask].index.tolist()
+    df_tmp = df_train.drop(columns=state["drop_cols"], errors="ignore")
+
+    cat_cols = df_tmp.select_dtypes("object").columns.tolist()
     state["cat_cols"] = cat_cols
     for col in cat_cols:
-        freq = df_train[col].value_counts(normalize=True).to_dict()
+        freq = df_tmp[col].value_counts(normalize=True).to_dict()
         state[f"{col}_freq"] = {str(k): float(v) for k, v in freq.items()}
-    nan_rates = df_train.isnull().mean()
-    state["drop_cols"] = nan_rates[nan_rates > 0.5].index.tolist()
     return state
 
 def transform(df, state, config):
     df = df.copy().drop(columns=state["drop_cols"], errors="ignore")
     for col in state["cat_cols"]:
         if col in df.columns:
-            df[f"{col}_freq"] = df[col].map(state[f"{col}_freq"]).fillna(0)
+            freq_map = state.get(f"{col}_freq", {})
+            df[f"{col}_freq_enc"] = df[col].apply(lambda x: freq_map.get(str(x), 0.0))
             df = df.drop(columns=[col])
+    for col in df.select_dtypes("object").columns:
+        df = df.drop(columns=[col])
     return df.fillna(-1)
 ```
 
@@ -293,10 +377,10 @@ from harness.utils import get_gpu_info
 
 def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     gpu = get_gpu_info()
-    pos, neg = y_train.sum(), len(y_train) - y_train.sum()
+    pos, neg = int(y_train.sum()), int(len(y_train) - y_train.sum())
     model = xgb.XGBClassifier(
         n_estimators=1000, max_depth=6, learning_rate=0.05,
-        scale_pos_weight=neg/pos,
+        scale_pos_weight=neg / max(pos, 1),
         tree_method=gpu["tree_method"], device=gpu["device"],
         eval_metric="aucpr", early_stopping_rounds=50, random_state=42,
     )
@@ -308,54 +392,65 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     }
 ```
 
-### 4. Seed and run
+### 4. Create a journal (`journal_mydataset.md`)
+
+```markdown
+# Journal: my-dataset
+
+## Current Thesis (max 5 sentences)
+<What you believe is the dominant unmodeled signal, and why.>
+
+## Active Campaign
+- Goal: <e.g., "Establish SOTA using identity cluster + TE + UID aggs">
+- Step 1: baseline — status: planned
+- Step 2: model regularization if PSI > 0.15 — status: planned
+- Abandon criteria: abandon step only after 3 consecutive losses > 0.005 composite
+
+## Open Questions
+## Lessons Learned (append-only, max 20)
+## Discarded Theses (max 5)
+```
+
+### 5. Run column analysis, then seed
 
 ```bash
-pip install -e .
+# Compute univariate predictivity for all raw columns
+python3 -m harness.column_analysis my-dataset
 
+# Save baseline experiment
 python3 -m harness.evaluate --config configs/my-dataset.yaml \
     --save --hypothesis "baseline"
 
+# Inspect what you're working with
 python3 -m harness.context my-dataset
 python3 -m harness.dashboard --open
 ```
 
-### 5. Launch the agent
+### 6. Launch the agent
 
-Point Claude Code or Cursor at `program.md` with the dataset config. The agent reads `program.md`, the config, `recipes.md`, `fraud_practices.md`, and the current experiment context — then loops until told to stop.
-
----
-
-## Adapting to a New Domain
-
-The harness is domain-agnostic — only the config, feature files, model files, `recipes.md`, and `program.md` are domain-specific.
-
-| What to change | What stays the same |
-|----------------|---------------------|
-| `configs/*.yaml` — data paths, metric weights, domain profile | `harness/evaluate.py` — pipeline orchestration |
-| `features_*.py` — domain-specific transforms | `harness/experiment_tracker.py` — tracking |
-| `model_*.py` — algorithm choices | `harness/context.py` — agent memory |
-| `recipes.md` — domain feature patterns | `harness/dashboard.py` — dashboard |
-| `program.md` — agent strategy guidance | All metric computation |
-| `fraud_practices.md` → `domain_practices.md` | Fit/transform API contract |
+Point Claude Code at `program.md` with the dataset config. The agent reads `program.md`, recipes, the column analysis, the journal, and the current experiment context — then loops.
 
 ---
 
-## Running the Agent
+## Running the Agent Manually
 
 ```bash
 # Single evaluation
 python3 -m harness.evaluate --config configs/ieee-cis.yaml \
-    --save --hypothesis "add velocity features"
+    --save --hypothesis "step 2/4: add UID aggregations"
 
-# View experiment history
-python3 -m harness.experiment_tracker ieee-cis
+# View column analysis
+python3 -m harness.column_analysis ieee-cis --show
 
-# View agent context
+# View experiment history and context
 python3 -m harness.context ieee-cis
 
 # Regenerate dashboard
 python3 -m harness.dashboard --open
+
+# Run parallel tracks (same data, independent FE files)
+python3 -m harness.evaluate --config configs/ieee-cis.yaml       # Track A
+python3 -m harness.evaluate --config configs/ieee-cis-fresh.yaml # Track B
 ```
 
 ---
@@ -371,10 +466,18 @@ python3 -m harness.dashboard --open
 
 ## All Dataset Plots
 
-### IEEE-CIS
+### IEEE-CIS — Track A
 
-![IEEE-CIS results](reports/plot_ieee-cis.png)
+![IEEE-CIS Track A results](reports/plot_ieee-cis.png)
+
+### IEEE-CIS — Track B (Fresh Start)
+
+![IEEE-CIS Track B results](reports/plot_ieee-cis-fresh.png)
 
 ### FDH (Fraud Detection Handbook)
 
 ![FDH results](reports/plot_fdh.png)
+
+### Fraud-Sim
+
+![Fraud-Sim results](reports/plot_fraud-sim.png)

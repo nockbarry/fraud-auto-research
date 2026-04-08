@@ -22,7 +22,9 @@ Structure:
 
 import json
 import os
+import re
 import shutil
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -158,8 +160,15 @@ def save_experiment(
             "psi": clean_metrics.get("psi"),
             "n_features": clean_metrics.get("n_features"),
             "auprc_ci": clean_metrics.get("auprc_ci"),
+            # Overfitting metrics (train→val)
+            "auroc_train": clean_metrics.get("auroc_train"),
+            "auroc_train_val_gap": clean_metrics.get("auroc_train_val_gap"),
+            "train_val_psi": clean_metrics.get("train_val_psi"),
+            "ci_width_val": clean_metrics.get("ci_width_val"),
         },
         "top_features": {k: v for k, v in list(clean_metrics.get("top_features", {}).items())[:10]},
+        "feature_psi": {k: v for k, v in list(clean_metrics.get("feature_psi", {}).items())[:10]},
+        "feature_train_val_psi": {k: v for k, v in list(clean_metrics.get("feature_train_val_psi", {}).items())[:10]},
         "leakage_warnings": clean_metrics.get("leakage_warnings", []),
         "config_snapshot": config_snapshot,
     }
@@ -363,9 +372,147 @@ def compare_experiments(dataset: str, exp_a: str, exp_b: str) -> str:
     return "\n".join(lines)
 
 
+# --- Ambition reporting --------------------------------------------------------
+
+_CAMPAIGN_TAG_PAT = re.compile(
+    r"([\w-]+)\s*campaign\s+step\s*(\d+)\s*(?:/|of)\s*(\d+)",
+    re.IGNORECASE,
+)
+
+# Keywords that indicate an ambitious technique attempt
+_AMBITIOUS_KEYWORDS = [
+    "uid", "construct_uid", "card1_addr1",
+    "window_velocity", "vel_1h", "vel_24h", "vel_7d", "vel_60s", "vel_600s",
+    "rolling_term", "term_fraud_28d", "rolling_fraud_rate", "term_compromise",
+    "fingerprint", "von_mises", "von mises",
+    "recipe 15", "recipe 16", "recipe 17", "recipe 18", "recipe 19",
+    "recipe15", "recipe16", "recipe17", "recipe18", "recipe19",
+]
+
+# Recipes 15-19 detection (for the "ambitious recipes used" line)
+_RECIPE_PATTERNS = {
+    "15 (UID)": re.compile(r"recipe\s*15|construct_uid|\buid_\b|card1_addr1", re.I),
+    "16 (window velocity)": re.compile(r"recipe\s*16|window_velocity|vel_(?:1h|24h|7d|60s|600s)", re.I),
+    "17 (rolling terminal)": re.compile(r"recipe\s*17|rolling_term|term_fraud_28d|term_compromise", re.I),
+    "18 (fingerprint)": re.compile(r"recipe\s*18|fingerprint", re.I),
+    "19 (von Mises)": re.compile(r"recipe\s*19|von[\s_]?mises", re.I),
+}
+
+
+def _classify_ambition(exp: dict, prev_n_features: int | None) -> str:
+    """Tier classifier — two of three signals = ambitious."""
+    hyp = (exp.get("hypothesis", "") or "").lower()
+    feat_names = " ".join((exp.get("top_features", {}) or {}).keys()).lower()
+    text = hyp + " " + feat_names
+
+    # Signal 1: ambitious keyword present
+    sig_keyword = any(kw in text for kw in _AMBITIOUS_KEYWORDS)
+
+    # Signal 2: feature delta >= 8
+    n_features = (exp.get("metrics_summary", {}) or {}).get("n_features") or 0
+    delta = (n_features - prev_n_features) if prev_n_features is not None else 0
+    sig_delta = delta >= 8
+
+    # Signal 3: explicit recipe 15-19 reference
+    sig_recipe = bool(re.search(r"recipe\s*1[5-9]", hyp))
+
+    score = sum([sig_keyword, sig_delta, sig_recipe])
+    if score >= 2:
+        return "ambitious"
+    if score == 1 or 4 <= delta < 8:
+        return "moderate"
+    return "standard"
+
+
+def ambition_report(dataset: str | None = None, n_recent: int = 30) -> None:
+    """Print ambition metrics across the last N experiments per dataset.
+
+    Measures whether the agent is attempting feature leaps (UID construction,
+    multi-window velocity stacks, rolling fraud rate, behavioral fingerprints,
+    von Mises) vs single-tweak drift.
+    """
+    datasets = [dataset] if dataset else list_datasets()
+
+    for ds in datasets:
+        history = load_history(ds)
+        if not history:
+            print(f"\n{ds}: no experiments yet")
+            continue
+
+        recent = history[-n_recent:]
+
+        # Feature deltas (need previous n_features as baseline per step)
+        deltas = []
+        prev_n = None
+        for exp in recent:
+            n_feat = (exp.get("metrics_summary", {}) or {}).get("n_features") or 0
+            if prev_n is not None and n_feat > 0:
+                deltas.append(n_feat - prev_n)
+            if n_feat > 0:
+                prev_n = n_feat
+
+        mean_delta = sum(deltas) / len(deltas) if deltas else 0
+        max_delta = max(deltas) if deltas else 0
+
+        # Campaign-tagged experiments
+        tagged = []
+        campaign_names = set()
+        for exp in recent:
+            hyp = exp.get("hypothesis", "") or ""
+            m = _CAMPAIGN_TAG_PAT.search(hyp)
+            if m:
+                tagged.append(exp)
+                campaign_names.add(m.group(1).lower())
+
+        # Recipe usage
+        recipe_counts = Counter()
+        for exp in recent:
+            hyp = exp.get("hypothesis", "") or ""
+            for label, pat in _RECIPE_PATTERNS.items():
+                if pat.search(hyp):
+                    recipe_counts[label] += 1
+
+        # Tier classification
+        tiers = Counter()
+        prev_n = None
+        for exp in recent:
+            tier = _classify_ambition(exp, prev_n)
+            tiers[tier] += 1
+            n_feat = (exp.get("metrics_summary", {}) or {}).get("n_features") or 0
+            if n_feat > 0:
+                prev_n = n_feat
+
+        total = sum(tiers.values()) or 1
+
+        print(f"\n{'='*60}")
+        print(f"  Ambition report: {ds} (last {len(recent)} experiments)")
+        print(f"{'='*60}")
+        print(f"  Mean Δ features per experiment:        {mean_delta:+.1f}  (target: 8+)")
+        print(f"  Max Δ features in single experiment:   {max_delta:+d}")
+        print(f"  Experiments with campaign tag:         {len(tagged)}/{len(recent)}")
+        print(f"  Distinct campaigns attempted:          {len(campaign_names)}"
+              + (f"  ({', '.join(sorted(campaign_names))})" if campaign_names else ""))
+        if recipe_counts:
+            recipe_str = ", ".join(f"{name} ({n}x)" for name, n in recipe_counts.most_common())
+            print(f"  Ambitious recipes used (15-19):        {recipe_str}")
+        else:
+            print(f"  Ambitious recipes used (15-19):        none")
+        print(f"  Ambition tier classification:")
+        for tier in ("standard", "moderate", "ambitious"):
+            n = tiers.get(tier, 0)
+            pct = n / total * 100
+            marker = "  <-- target: 20%+" if tier == "ambitious" else ""
+            print(f"    {tier:<10} {n:>3}  ({pct:>4.0f}%){marker}")
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1:
-        print_status(sys.argv[1])
+    args = sys.argv[1:]
+    if "--ambition-report" in args:
+        args.remove("--ambition-report")
+        ds = args[0] if args else None
+        ambition_report(ds)
+    elif args:
+        print_status(args[0])
     else:
         print_status()

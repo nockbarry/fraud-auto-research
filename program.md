@@ -155,18 +155,70 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 - Check `top_features:` output after each run to verify new features contribute
 - If feature has importance < 0.001, consider removing it (adds noise)
 
+## Multi-Step Campaigns (read before every experiment)
+
+A "feature leap" is a 3-5 experiment campaign aimed at a specific signal, not a single tweak. Single-feature experiments asymptote at +0.005 composite. Campaigns can move +0.05. Kaggle competition winners (IEEE-CIS, AMEX) all used compound moves: UID construction → 200+ aggregations, multi-window velocity stacks, behavioral fingerprints across multiple entities. The agent's job is to attempt those moves here.
+
+### Campaign templates
+
+1. **UID Aggregation Campaign** (4 experiments — IEEE-CIS / fraud-sim)
+   - Step 1: build UID via Recipe 15 (e.g., `card1 + addr1 + D1`), add 5 basic UID aggregations (mean amt, std amt, count, distinct merchants, distinct days)
+   - Step 2: add 10 more UID aggregations — time-of-day stats, tx gap stats, amount percentiles, distinct terminals
+   - Step 3: add UID-conditioned velocity stack (Recipe 16 keyed by UID instead of card1)
+   - Step 4: add UID-level OOF target encoding (Recipe 1 with UID as the column, smoothing=10)
+
+2. **Velocity Stack Campaign** (4 experiments — all datasets)
+   - Step 1: add 1h/24h/7d count and sum per primary entity (Recipe 16, 12 features)
+   - Step 2: add std and burst (count_1h / count_7d) features for the same windows (8 more features)
+   - Step 3: cross with rolling terminal/merchant fraud rate (Recipe 17, 5 more features)
+   - Step 4: add velocity ratios and acceleration (count_1h / count_24h, sudden activity spikes)
+
+3. **Per-Scenario Campaign for FDH** (3 experiments — REQUIRED for FDH)
+   - `configs/fdh.yaml` lines 79-83 documents three fraud scenarios — re-read them before starting.
+   - Scenario 1 (high amount, 973 cases): Recipe 18 customer fingerprints + Recipe 19 von Mises hour
+   - Scenario 2 (terminal compromise 28d, 9077 cases): Recipe 17 rolling terminal fraud rate + Recipe 16 windowed velocity per terminal
+   - Scenario 3 (CNP small repeated, 4631 cases): Recipe 16 with 1m/10m windows + customer-distinct-terminals count
+
+### Persistence rules
+
+- A step that loses `< 0.005` composite is **not a failure** — keep going to the next step.
+- Only abandon a campaign after **3 consecutive steps each lose `> 0.005` composite**, OR if the journal's "Abandon criteria" is hit.
+- Before discarding a step, **try one variation** of the same recipe (different window, different smoothing, different entity).
+- The hypothesis field of every experiment must reference its campaign step using the exact pattern:
+  `"velocity-stack campaign step 2/4: add std + burst on top of step 1's 1h/24h/7d counts"`. The harness scans for `step X/Y` to track campaigns.
+
+### Updating the journal
+
+- BEFORE every experiment: re-read `journal_{dataset}.md`. If the thesis is contradicted by the last 3 keeps, rewrite it.
+- BEFORE starting a campaign: write all 3-5 planned steps into "Active Campaign" with status `planned`.
+- AFTER every experiment: append exactly one line to "Lessons Learned". Prune oldest if over 20.
+- A campaign is "done" when 4 of its planned steps have status `done(exp_NNN)` or `failed`.
+- Keep the journal under 4 KB total. Discarded Theses capped at 5 entries — graveyard, not history.
+
 ## The Experiment Loop
 
 **LOOP FOREVER:**
 
-1. **Read context**: After each `--save` run, a full experiment context is printed automatically. Or run `python3 -m harness.context <dataset>` to see:
+0. **READ THE COLUMN ANALYSIS FIRST** (before journal, before SOTA, before anything else). Every context dump includes a `RAW COLUMN ANALYSIS` block from `harness/column_analysis.py` showing per-column IV, univariate AUC, null-flag AUC, and NaN%. This is the EDA the agent has historically skipped — Run 3 spent 10 experiments chasing UID aggregations while ignoring `id_17` (IV=0.35), `id_30` (IV=0.62), `DeviceInfo` (IV=1.78). The block also lists `TRANSFORMED FEATURE ANALYSIS` after every keep — this is what the model currently sees, including any DEAD FEATURES (IV<0.005) that should be removed. Rules:
+   - If a column has IV ≥ 0.1 and is not in `top_features`, the FE pipeline is dropping/destroying it. Investigate.
+   - If a column has `null_AUC > 0.55` (marked with `*`), the missingness itself is predictive — add a `col_is_null` flag.
+   - **Do NOT blanket-drop columns by NaN rate.** High-NaN identity columns often carry the strongest signal via their null pattern. The IEEE-CIS `features_ieee.py` `fit()` now uses a selective rule (drop only `n_unique<=1` or `>99% NaN with <=5 levels`) — preserve this pattern in any FE you write.
+   - The column analysis is recomputed automatically: raw is cached for 50 experiments, transformed refreshes after every keep. If something feels stale, run `python3 -m harness.column_analysis {dataset} --refresh`.
+
+1. **Read context AND journal**: After each `--save` run, a full experiment context is printed automatically — and the top of that output now includes `journal_{dataset}.md` followed by the column analysis. If you don't see your journal there, create it (use the template in any existing `journal_*.md`). The context shows:
+   - Your journal: thesis, active campaign, lessons learned, discarded theses
+   - Raw column analysis (univariate IV / null-AUC / NaN%) — STEP 0 above
+   - Transformed feature analysis (post-FE IV) — surfaces dead features
    - Current SOTA with top features and confidence intervals
    - Last 10 experiments (kept and discarded) with AUPRC
+   - Active campaign tracking (which campaigns have stalled vs progressing)
    - Technique success rates (which categories of changes work)
    - Untried techniques from recipes.md
    - Feature importance trends (growing vs declining features)
    - Recommended next steps
-2. **Propose hypothesis**: Use the context to make an informed choice. Build on growing features, try untried techniques, avoid repeating failed categories.
+   Confirm before proposing: (a) is there an active campaign? (b) is this experiment a step in it? (c) does the campaign target a documented fraud scenario from `configs/{dataset}.yaml`? (d) does the column analysis show any high-IV columns that the SOTA top_features is ignoring?
+1.5. **Update journal BEFORE proposing**: If you're starting a new campaign, write all 3-5 planned steps into "Active Campaign" now (use the Edit tool on `journal_{dataset}.md`). If the thesis is contradicted by recent results, rewrite it. Prune Lessons Learned to 20 max. Move dead theses to Discarded Theses (max 5).
+2. **Propose hypothesis**: Use the context AND journal to make an informed choice. Build on growing features, try untried techniques, avoid repeating failed categories. If running a campaign step, the hypothesis MUST contain `step X/Y` (e.g., `"uid-aggregation campaign step 2/4: add 10 more UID time/distinct stats"`).
 3. **Implement**: Edit `features.py` fit() and/or transform(), or `model.py`.
 4. **Run and save**:
    ```bash
@@ -180,9 +232,34 @@ Read `recipes.md` for copy-paste code patterns. Read `fraud_practices.md` for SO
 
 ## Anti-Patterns
 
+- **DO NOT abandon a thesis after one losing experiment.** A campaign is 3-5 experiments. Re-read `journal_{dataset}.md` "Active Campaign" — only abandon if 3 consecutive steps each lose >0.005 composite. Run one variation (different window, different entity, different smoothing) before declaring a step failed. Single-tweak mode caps you at +0.005 per experiment; campaigns can move +0.05.
+- **DO NOT propose a single-feature tweak when a campaign is active.** If your journal's Active Campaign has incomplete steps, do the next step. Drift back to single tweaks is the failure mode that kills ambitious feature engineering.
 - **DO NOT compute target statistics in transform()** — the harness won't give you labels there.
 - **DO NOT use non-serializable objects in state** — it must be a dict of strings, numbers, and nested dicts/lists. Numpy arrays → `.tolist()`, sklearn objects → serialize their parameters manually.
 - **DO NOT one-hot encode high-cardinality features** — use target or frequency encoding.
-- **DO NOT ignore leakage warnings** — investigate and fix before proceeding.
+- **DO NOT blanket-drop columns by NaN rate.** A `nan_rates > 0.50` filter killed all 43 IEEE-CIS identity columns through 11 experiments — including DeviceInfo (IV=1.78), id_30 (IV=0.62), id_17 (IV=0.35). The null pattern is often the signal. Use the column analysis (Step 0) to decide what to drop, and prefer leaving NaN intact for XGBoost's native handling, or adding a single `cluster_present` binary flag for correlated null clusters.
+- **DO NOT ignore the column analysis block** — if a column has IV ≥ 0.1 and is missing from `top_features`, the FE pipeline is destroying signal. Trace why.
+- **DO NOT ignore leakage warnings** — investigate and fix before proceeding. Note: an `IV grade` of `high_card` (n_unique > 50) is NOT leakage — it's an artifact of per-level binning on high-cardinality categoricals. Only `LEAK?` (IV > 0.5 with n_unique ≤ 50) is suspicious.
 - **DO NOT use graph-based GNN features** — graph construction and GNN training require external infrastructure. Use entity resolution (Recipe 5) and cross-entity aggregations (fraud_practices.md Part 5.4) as graph-free alternatives.
 - **For HMM/autoencoder features**: wrap in `try/except` with `pass` so missing dependencies don't crash the harness. Check that card has ≥3 observations before HMM decoding — single-observation sequences produce unreliable posteriors.
+
+## Crash Recovery
+
+If your experiment is logged with status `crash` (or `timeout`), the working `features_{dataset}.py` and/or `model_{dataset}.py` is in a broken state. The previous SOTA's code is preserved as a snapshot — restore it before continuing:
+
+```bash
+# Replace the corrupted file with the last known-good SOTA snapshot
+cp experiments/{dataset}/sota/features.py features_{dataset}.py
+cp experiments/{dataset}/sota/model.py model_{dataset}.py
+
+# Verify it reproduces the SOTA score before trying again
+python3 -m harness.evaluate --config configs/{dataset}.yaml
+```
+
+Once the SOTA score is reproduced, make a smaller, more incremental change and try again. Common crash causes:
+
+- **Missing column**: referencing `df["foo"]` where `foo` doesn't exist in this dataset. Always check `dataset_profile.raw_columns` in the config first.
+- **Non-serializable state**: numpy arrays, sklearn objects, or pandas Series stored in the state dict. The harness checks JSON-serializability on every run — convert with `.tolist()`, `float()`, `int()`, or nested dict comprehensions.
+- **Missing import**: forgetting `import numpy as np` inside the features file.
+- **Division by zero**: dividing by a `std`, `count`, or `denominator` that can be zero. Always `.clip(lower=0.01)` denominators.
+- **Timeout**: a fit() or transform() step that doesn't scale linearly. Check for accidental cross-joins, full pairwise distance matrices, or `.map()` on dictionaries with millions of keys (use `.apply(lambda x: d.get(x, default))` for large dicts).

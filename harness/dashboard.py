@@ -28,6 +28,15 @@ import pandas as pd
 
 REPORTS_DIR = ROOT_DIR / "reports"
 
+# Human-readable display names for dataset sections.
+# Dataset key → (heading, badge_label, badge_color_css)
+DATASET_DISPLAY = {
+    "ieee-cis":       ("IEEE-CIS — Track A: Continued", "Track A", "#3b82f6"),
+    "ieee-cis-fresh": ("IEEE-CIS — Track B: Fresh Start", "Track B", "#a78bfa"),
+    "fdh":            ("FDH", None, None),
+    "fraud-sim":      ("Fraud-Sim", None, None),
+}
+
 
 def _history_to_df(history: list[dict]) -> pd.DataFrame:
     rows = []
@@ -205,7 +214,8 @@ def generate_dashboard_html(data: dict) -> str:
     best_auprc = max((d.get("best_auprc_oot", d.get("best_auprc", 0)) for d in datasets.values()), default=0)
 
     nav_links = " &nbsp;|&nbsp; ".join(
-        f'<a href="#{name}" class="nav-link">{name}</a>' for name in datasets
+        f'<a href="#{name}" class="nav-link">{DATASET_DISPLAY.get(name, (name,))[0]}</a>'
+        for name in datasets
     )
     cards_html = f"""
         <div class="card blue"><div class="label">Datasets</div><div class="value">{len(datasets)}</div></div>
@@ -226,9 +236,20 @@ def generate_dashboard_html(data: dict) -> str:
         imp_pct = ds.get("improvement_pct", 0)
         imp_color = "num" if imp_pct >= 0 else "neg"
 
+        disp = DATASET_DISPLAY.get(name, (name, None, None))
+        heading_text = disp[0]
+        badge_label = disp[1]
+        badge_color = disp[2]
+        badge_html = (
+            f'<span style="margin-left:10px;padding:2px 9px;border-radius:12px;'
+            f'background:{badge_color}22;color:{badge_color};'
+            f'font-size:11px;font-weight:700;border:1px solid {badge_color}44">'
+            f'{badge_label}</span>'
+        ) if badge_label else ""
+
         datasets_html += f"""
         <div class="dataset-section" id="{name}">
-            <h2><a href="#{name}" class="section-anchor">{name}</a></h2>
+            <h2><a href="#{name}" class="section-anchor">{heading_text}</a>{badge_html}</h2>
             <div class="subtitle">{ds.get("sota_hypothesis", "")}</div>
             <div class="stats-row">
                 <div class="stat">Experiments: <strong>{ds["total"]}</strong></div>

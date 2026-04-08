@@ -38,10 +38,19 @@ metrics:
   target_recall: 0.80
   composite_weights:
     auprc: 0.50
-    precision_at_recall: 0.30
-    psi_penalty: 0.20
+    precision_at_recall: 0.25
+    psi_penalty: 0.10
+    train_val_psi_penalty: 0.05
+    ci_width_penalty: 0.05
+    auroc_gap_penalty: 0.05
   psi_threshold: 0.20
   psi_hard_reject: 0.25
+  train_val_psi_threshold: 0.10
+  train_val_psi_max: 0.20
+  ci_width_threshold: 0.02
+  ci_width_max: 0.06
+  auroc_gap_threshold: 0.03
+  auroc_gap_max: 0.15
   min_improvement: 0.001
 
 validation:

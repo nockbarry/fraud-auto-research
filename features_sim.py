@@ -1,219 +1,292 @@
-"""Feature engineering for fraud-sim dataset. Agent-editable.
+"""Fraud-sim feature engineering. Agent-editable.
 
 Fit/transform API:
   fit(df_train, y_train, config) -> state dict (JSON-serializable)
   transform(df, state, config)   -> df (all numeric, no labels)
-
-Actual columns: card_id, merchant, category, TransactionAmt, gender, city, state, zip,
-                lat, long, city_pop, job, unix_time, merch_lat, merch_long, TransactionDT
 """
-import pandas as pd
+import math
 import numpy as np
+import pandas as pd
 
 
-def _smooth_target_enc(series: pd.Series, labels: pd.Series, min_samples: int = 30, global_mean: float = 0.0) -> dict:
-    """Compute smoothed target encoding: weight group mean toward global mean."""
-    df = pd.DataFrame({"key": series, "label": labels})
-    stats = df.groupby("key")["label"].agg(["sum", "count"]).reset_index()
-    stats.columns = ["key", "sum", "count"]
-    stats["rate"] = stats["sum"] / stats["count"]
-    # Smoothing: blend toward global mean by min_samples
-    stats["smoothed"] = (stats["sum"] + global_mean * min_samples) / (stats["count"] + min_samples)
-    return {str(k): float(v) for k, v in zip(stats["key"], stats["smoothed"])}
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+_WINDOWS_SEC = [600, 3600, 86400, 7 * 86400]  # 10min, 1h, 1d, 7d
+_WIN_NAMES = ["10m", "1h", "1d", "7d"]
 
+
+def _haversine_vec(lat1, lon1, lat2, lon2):
+    """Vectorized haversine distance in km."""
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+
+
+def _window_velocity(df, entity_col, time_col, amt_col, windows, win_names, history=None):
+    """O(N log N) rolling velocity with optional prepended training history."""
+    orig_len = len(df)
+    if history:
+        tail_rows = []
+        for ent, records in history.items():
+            for t, a in records:
+                tail_rows.append((ent, float(t), float(a)))
+        if tail_rows:
+            tail_ents, tail_times, tail_amts = zip(*tail_rows)
+            tail_df = pd.DataFrame({
+                entity_col: list(tail_ents),
+                time_col: list(tail_times),
+                amt_col: list(tail_amts),
+                "_is_tail": True,
+            })
+            working_df = df[[entity_col, time_col, amt_col]].copy()
+            working_df["_is_tail"] = False
+            combined = pd.concat([tail_df, working_df], ignore_index=True)
+        else:
+            combined = df[[entity_col, time_col, amt_col]].copy()
+            combined["_is_tail"] = False
+    else:
+        combined = df[[entity_col, time_col, amt_col]].copy()
+        combined["_is_tail"] = False
+
+    combined = combined.sort_values(time_col)
+    times_all = combined[time_col].values.astype(np.float64)
+    ents_all = combined[entity_col].astype(str).values
+    amts_all = combined[amt_col].values.astype(np.float64)
+    is_tail = combined["_is_tail"].values
+    n_total = len(combined)
+
+    result = {}
+    for wname in win_names:
+        result[f"{entity_col}_{wname}_count"] = np.zeros(n_total)
+        result[f"{entity_col}_{wname}_sum"] = np.zeros(n_total)
+
+    unique_ents = np.unique(ents_all)
+    for ent in unique_ents:
+        mask = ents_all == ent
+        idxs = np.where(mask)[0]
+        t = times_all[idxs]
+        a = amts_all[idxs]
+        n = len(t)
+        cum_amt = np.concatenate([[0.0], np.cumsum(a)])
+        for w, wname in zip(windows, win_names):
+            start_pos = np.searchsorted(t, t - w, side="left")
+            counts = np.arange(n) - start_pos
+            sums = cum_amt[np.arange(n)] - cum_amt[start_pos]
+            for k, global_idx in enumerate(idxs):
+                result[f"{entity_col}_{wname}_count"][global_idx] = counts[k]
+                result[f"{entity_col}_{wname}_sum"][global_idx] = sums[k]
+
+    result_df = pd.DataFrame(result, index=np.arange(n_total))
+    non_tail = ~is_tail
+    result_trimmed = result_df[non_tail].copy()
+    result_trimmed.index = df.index
+    return result_trimmed
+
+
+# ---------------------------------------------------------------------------
+# fit / transform
+# ---------------------------------------------------------------------------
 
 def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
-    """Fit on training data only. Returns JSON-serializable state."""
     state: dict = {}
-    global_mean = float(y_train.mean())
-    state["global_mean"] = global_mean
+    state["global_mean"] = float(y_train.mean())
 
-    # Drop columns with >50% NaN
     nan_rates = df_train.isnull().mean()
     state["drop_cols"] = nan_rates[nan_rates > 0.50].index.tolist()
     df_tmp = df_train.drop(columns=state["drop_cols"], errors="ignore")
 
-    # Identify categorical columns (excluding ID cols we handle separately)
     cat_cols = df_tmp.select_dtypes("object").columns.tolist()
-    # Remove cols handled with target encoding or separate logic
-    # Also remove city (894 unique, noisy) and job (494 unique, handled separately)
-    skip_freq = {"merchant", "category", "city"}
-    cat_cols = [c for c in cat_cols if c not in skip_freq]
     state["cat_cols"] = cat_cols
-
-    # Frequency encoding for remaining categoricals
     for col in cat_cols:
         freq = df_tmp[col].value_counts(normalize=True).to_dict()
         state[f"{col}_freq"] = {str(k): float(v) for k, v in freq.items()}
 
-    # --- Target encoding: category (smoothed fraud rate) ---
-    if "category" in df_tmp.columns:
-        state["category_te"] = _smooth_target_enc(df_tmp["category"], y_train, min_samples=30, global_mean=global_mean)
+    cfg = config.get("dataset_profile", {})
+    amt_col = cfg.get("amt_col", "TransactionAmt")
+    cust_col = cfg.get("key_entity_col", "card_id")
+    time_col = cfg.get("time_col", "TransactionDT")
 
-    # --- Target encoding: merchant (smoothed fraud rate, ~670 unique) ---
-    if "merchant" in df_tmp.columns:
-        state["merchant_te"] = _smooth_target_enc(df_tmp["merchant"], y_train, min_samples=30, global_mean=global_mean)
+    # Per-card behavioral stats
+    cust_grp = df_tmp.groupby(cust_col)[amt_col]
+    state["cust_mean"] = cust_grp.mean().to_dict()
+    state["cust_std"] = cust_grp.std().fillna(1.0).to_dict()
+    state["cust_p90"] = cust_grp.quantile(0.90).to_dict()
+    state["global_mean_amt"] = float(df_tmp[amt_col].mean())
+    state["global_std_amt"] = float(df_tmp[amt_col].std())
 
-    # --- Behavioral profiling: per-card (card_id) aggregations ---
-    if "card_id" in df_tmp.columns and "TransactionAmt" in df_tmp.columns:
-        card_stats = df_tmp.groupby("card_id")["TransactionAmt"].agg(
-            card_mean="mean",
-            card_std="std",
-            card_max="max",
-            card_median="median",
-            card_count="count",
-        ).reset_index()
-        card_stats["card_std"] = card_stats["card_std"].fillna(0.0)
-        state["card_mean"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_mean"])}
-        state["card_std"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_std"])}
-        state["card_max"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_max"])}
-        state["card_median"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_median"])}
-        state["card_count"] = {str(k): float(v) for k, v in zip(card_stats["card_id"], card_stats["card_count"])}
-        state["global_amt_mean"] = float(df_tmp["TransactionAmt"].mean())
-        state["global_amt_std"] = float(df_tmp["TransactionAmt"].std())
+    # Per-card home location (for geo features, should be stable per card)
+    home_loc = df_tmp.groupby(cust_col)[["lat", "long"]].first()
+    state["cust_home_lat"] = home_loc["lat"].to_dict()
+    state["cust_home_long"] = home_loc["long"].to_dict()
 
-    # --- Amount vs category median ---
-    if "category" in df_tmp.columns and "TransactionAmt" in df_tmp.columns:
-        cat_median = df_tmp.groupby("category")["TransactionAmt"].median().to_dict()
-        state["cat_median_amt"] = {str(k): float(v) for k, v in cat_median.items()}
+    # Smoothed category TE (category has ~14 unique values — stable)
+    global_rate = float(y_train.mean())
+    smoothing = 20
+    category_col = "category"
+    if category_col in df_tmp.columns:
+        df_tmp_lab = df_tmp[[category_col]].copy()
+        df_tmp_lab["_label"] = y_train.values
+        grp = df_tmp_lab.groupby(category_col)["_label"].agg(["sum", "count"])
+        smoothed = (grp["sum"] + smoothing * global_rate) / (grp["count"] + smoothing)
+        state["category_te"] = {str(k): float(v) for k, v in smoothed.items()}
 
-    # --- Merchant transaction volume (how busy is this merchant) ---
-    if "merchant" in df_tmp.columns:
-        merch_volume = df_tmp["merchant"].value_counts().to_dict()
-        state["merchant_volume"] = {str(k): int(v) for k, v in merch_volume.items()}
+    # Per-card behavioral stats: distinct merchant/category counts
+    state["cust_n_merchants"] = df_tmp.groupby(cust_col)["merchant"].nunique().to_dict()
+    state["cust_n_categories"] = df_tmp.groupby(cust_col)["category"].nunique().to_dict()
+    state["global_n_merchants"] = float(df_tmp["merchant"].nunique()) / len(df_tmp[cust_col].unique())
 
-    # --- Per-card: fraud-related behavioral ratios ---
-    # Number of unique merchants per card (indicates spread of transactions)
-    if "card_id" in df_tmp.columns and "merchant" in df_tmp.columns:
-        card_merch_counts = df_tmp.groupby("card_id")["merchant"].nunique()
-        state["card_n_merchants"] = {str(k): int(v) for k, v in card_merch_counts.items()}
+    # Remove merchant from cat_cols so we don't get redundant freq_enc for it
+    # (merchant has 800 unique values; TE is better than freq enc)
+    merchant_col = "merchant"
+    if merchant_col in df_tmp.columns:
+        df_tmp_lab2 = df_tmp[[merchant_col]].copy()
+        df_tmp_lab2["_label"] = y_train.values
+        grp_m = df_tmp_lab2.groupby(merchant_col)["_label"].agg(["sum", "count"])
+        smoothed_m = (grp_m["sum"] + smoothing * global_rate) / (grp_m["count"] + smoothing)
+        state["merchant_te"] = {str(k): float(v) for k, v in smoothed_m.items()}
 
-    # --- Per-card: night transaction ratio ---
-    if "card_id" in df_tmp.columns and "unix_time" in df_tmp.columns:
-        tmp2 = df_tmp.copy()
-        dt = pd.to_datetime(tmp2["unix_time"], unit="s")
-        tmp2["_is_night"] = ((dt.dt.hour >= 22) | (dt.dt.hour < 6)).astype(int)
-        card_night_ratio = tmp2.groupby("card_id")["_is_night"].mean()
-        state["card_night_ratio"] = {str(k): float(v) for k, v in card_night_ratio.items()}
+    # Per-card typical hour distribution (for behavioral fingerprint)
+    if "unix_time" in df_tmp.columns:
+        df_tmp["_hour"] = pd.to_datetime(df_tmp["unix_time"], unit="s").dt.hour
+        cust_hour_mean = df_tmp.groupby(cust_col)["_hour"].mean()
+        state["cust_hour_mean"] = {str(k): float(v) for k, v in cust_hour_mean.items()}
 
-    # --- Per-card: unique categories (diversification) ---
-    if "card_id" in df_tmp.columns and "category" in df_tmp.columns:
-        card_cat_counts = df_tmp.groupby("card_id")["category"].nunique()
-        state["card_n_categories"] = {str(k): int(v) for k, v in card_cat_counts.items()}
+    # Per-card typical haversine distance
+    df_tmp["_geo_dist"] = _haversine_vec(
+        df_tmp["lat"].values, df_tmp["long"].values,
+        df_tmp["merch_lat"].values, df_tmp["merch_long"].values
+    )
+    cust_dist_mean = df_tmp.groupby(cust_col)["_geo_dist"].mean()
+    cust_dist_std = df_tmp.groupby(cust_col)["_geo_dist"].std().fillna(1.0)
+    cust_dist_p90 = df_tmp.groupby(cust_col)["_geo_dist"].quantile(0.90)
+    state["cust_dist_mean"] = {str(k): float(v) for k, v in cust_dist_mean.items()}
+    state["cust_dist_std"] = {str(k): float(v) for k, v in cust_dist_std.items()}
+    state["cust_dist_p90"] = {str(k): float(v) for k, v in cust_dist_p90.items()}
+    state["global_dist_mean"] = float(df_tmp["_geo_dist"].mean())
+    state["global_dist_std"] = float(df_tmp["_geo_dist"].std())
+
+    # Store last 7 days of training for velocity continuity
+    max_window = max(_WINDOWS_SEC)
+    max_train_t = float(df_tmp[time_col].max())
+    tail_mask = df_tmp[time_col] >= (max_train_t - max_window)
+    tail = df_tmp.loc[tail_mask, [cust_col, time_col, amt_col]]
+    cust_tail: dict = {}
+    for ent, grp in tail.groupby(cust_col):
+        cust_tail[str(ent)] = [
+            [float(t), float(a)] for t, a in zip(grp[time_col], grp[amt_col])
+        ]
+    state["cust_tail"] = cust_tail
 
     return state
 
 
 def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
-    """Transform without labels. Apply fitted state."""
     df = df.copy()
     df = df.drop(columns=state.get("drop_cols", []), errors="ignore")
+
+    cfg = config.get("dataset_profile", {})
+    amt_col = cfg.get("amt_col", "TransactionAmt")
+    cust_col = cfg.get("key_entity_col", "card_id")
+    time_col = cfg.get("time_col", "TransactionDT")
+
+    # --- TE for merchant and category (before categorical freq enc drop) ---
+    global_fraud_rate = float(state.get("global_mean", 0.005))
+    if "category" in df.columns:
+        df["category_te"] = df["category"].astype(str).map(state.get("category_te", {})).fillna(global_fraud_rate)
+    if "merchant" in df.columns:
+        df["merchant_te"] = df["merchant"].astype(str).map(state.get("merchant_te", {})).fillna(global_fraud_rate)
+
+    # Frequency encoding for other categoricals (skip merchant — TE replaces it)
+    for col in state.get("cat_cols", []):
+        if col in df.columns and col != "merchant":
+            freq_map = state.get(f"{col}_freq", {})
+            df[f"{col}_freq_enc"] = df[col].apply(lambda x: freq_map.get(str(x), 0.0))
+            df = df.drop(columns=[col])
+    # Drop merchant (already TE'd above)
+    df = df.drop(columns=["merchant"], errors="ignore")
+
+    # --- Haversine distance: home to merchant ---
+    if "lat" in df.columns and "merch_lat" in df.columns:
+        home_lat = df[cust_col].map(state.get("cust_home_lat", {})).fillna(df["lat"])
+        home_long = df[cust_col].map(state.get("cust_home_long", {})).fillna(df["long"])
+        df["haversine_km"] = _haversine_vec(
+            home_lat.values, home_long.values,
+            df["merch_lat"].values, df["merch_long"].values
+        )
+        df["log_haversine_km"] = np.log1p(df["haversine_km"])
+
+    # --- Customer behavioral deviation ---
+    df["cust_mean_amt"] = df[cust_col].map(state["cust_mean"]).fillna(state["global_mean_amt"])
+    df["cust_std_amt"] = df[cust_col].map(state["cust_std"]).fillna(state["global_std_amt"])
+    df["cust_p90_amt"] = df[cust_col].map(state["cust_p90"]).fillna(state["global_mean_amt"])
+    df["amt_zscore_cust"] = (df[amt_col] - df["cust_mean_amt"]) / df["cust_std_amt"].clip(lower=0.01)
+    df["amt_vs_p90"] = df[amt_col] / df["cust_p90_amt"].clip(lower=1.0)
+    df = df.drop(columns=["cust_mean_amt", "cust_std_amt", "cust_p90_amt"], errors="ignore")
 
     # --- Time features from unix_time ---
     if "unix_time" in df.columns:
         dt = pd.to_datetime(df["unix_time"], unit="s")
-        df["hour"] = dt.dt.hour
-        df["day_of_week"] = dt.dt.dayofweek
-        df["is_night"] = ((df["hour"] >= 22) | (df["hour"] < 6)).astype(int)
-        # Drop is_weekend (weak) and keep only is_night + hour + day_of_week
-        df = df.drop(columns=["unix_time"])
+        df["hour_sin"] = np.sin(2 * np.pi * dt.dt.hour / 24)
+        df["hour_cos"] = np.cos(2 * np.pi * dt.dt.hour / 24)
+        df["dow_sin"] = np.sin(2 * np.pi * dt.dt.dayofweek / 7)
+        df["dow_cos"] = np.cos(2 * np.pi * dt.dt.dayofweek / 7)
+        df["is_night"] = ((dt.dt.hour >= 22) | (dt.dt.hour <= 6)).astype(float)
 
-    # Drop high-PSI raw time column
-    if "TransactionDT" in df.columns:
-        df = df.drop(columns=["TransactionDT"])
+    # --- Velocity stack with training history ---
+    cust_history = {k: [tuple(v2) for v2 in v] for k, v in state.get("cust_tail", {}).items()}
+    cust_vel = _window_velocity(df, cust_col, time_col, amt_col, _WINDOWS_SEC, _WIN_NAMES, cust_history)
+    df = pd.concat([df, cust_vel], axis=1)
 
-    # --- Geo-distance: haversine between cardholder home and merchant ---
-    if all(c in df.columns for c in ["lat", "long", "merch_lat", "merch_long"]):
-        def haversine(row):
-            lat1, lon1 = np.radians(row["lat"]), np.radians(row["long"])
-            lat2, lon2 = np.radians(row["merch_lat"]), np.radians(row["merch_long"])
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
-            a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
-            return 6371.0 * 2 * np.arcsin(np.sqrt(a))
-        df["home_merch_dist"] = df.apply(haversine, axis=1)
+    # --- Per-card behavioral fingerprint: unusual hour + unusual distance ---
+    if "unix_time" in df.columns:
+        curr_hour = pd.to_datetime(df["unix_time"], unit="s").dt.hour.values
+        cust_hour_mean_map = state.get("cust_hour_mean", {})
+        df["cust_hour_mean"] = df[cust_col].map(cust_hour_mean_map).fillna(12.0)
+        # Angular distance (hours are cyclic — use abs circular diff)
+        hour_diff = np.abs(curr_hour - df["cust_hour_mean"].values)
+        df["hour_deviation"] = np.minimum(hour_diff, 24 - hour_diff)
+        df = df.drop(columns=["cust_hour_mean"], errors="ignore")
 
-    # --- Amount features (keep only log_amt; drop is_round_amt as it's weak) ---
-    if "TransactionAmt" in df.columns:
-        df["log_amt"] = np.log1p(df["TransactionAmt"])
+    # Per-card haversine deviation
+    df["cust_dist_mean_map"] = df[cust_col].map(state.get("cust_dist_mean", {})).fillna(state.get("global_dist_mean", 50.0))
+    df["cust_dist_std_map"] = df[cust_col].map(state.get("cust_dist_std", {})).fillna(state.get("global_dist_std", 50.0))
+    df["cust_dist_p90_map"] = df[cust_col].map(state.get("cust_dist_p90", {})).fillna(state.get("global_dist_mean", 50.0))
+    if "haversine_km" in df.columns:
+        df["dist_zscore_cust"] = (df["haversine_km"] - df["cust_dist_mean_map"]) / df["cust_dist_std_map"].clip(lower=0.1)
+        df["dist_vs_p90"] = df["haversine_km"] / df["cust_dist_p90_map"].clip(lower=0.1)
+    df = df.drop(columns=["cust_dist_mean_map", "cust_dist_std_map", "cust_dist_p90_map"], errors="ignore")
 
-    # --- Behavioral profiling: per-card aggregations ---
-    if "card_id" in df.columns and "TransactionAmt" in df.columns:
-        global_mean = state.get("global_amt_mean", 0.0)
-        global_std = state.get("global_amt_std", 1.0)
-        if global_std == 0:
-            global_std = 1.0
+    # Burst ratios
+    df[f"{cust_col}_burst_10m_1h"] = (
+        (df[f"{cust_col}_10m_count"] + 1) / (df[f"{cust_col}_1h_count"] + 1)
+    )
+    df[f"{cust_col}_burst_1h_1d"] = (
+        (df[f"{cust_col}_1h_count"] + 1) / (df[f"{cust_col}_1d_count"] + 1)
+    )
 
-        card_mean_map = state.get("card_mean", {})
-        card_std_map = state.get("card_std", {})
-        card_max_map = state.get("card_max", {})
-        card_median_map = state.get("card_median", {})
-        card_count_map = state.get("card_count", {})
+    # --- Key interactions ---
+    if "haversine_km" in df.columns:
+        # High amount far from home
+        df["log_amt_x_log_dist"] = np.log1p(df[amt_col]) * df["log_haversine_km"]
+        # Rapid velocity far from home (card-testing while traveling)
+        df[f"vel_1h_x_dist"] = df[f"{cust_col}_1h_count"] * df["log_haversine_km"]
 
-        cc_keys = df["card_id"].astype(str)
-        df["card_mean_amt"] = cc_keys.apply(lambda x: card_mean_map.get(x, global_mean))
-        df["card_std_amt"] = cc_keys.apply(lambda x: card_std_map.get(x, global_std))
-        df["card_max_amt"] = cc_keys.apply(lambda x: card_max_map.get(x, global_mean))
-        df["card_median_amt"] = cc_keys.apply(lambda x: card_median_map.get(x, global_mean))
-        df["card_tx_count"] = cc_keys.apply(lambda x: card_count_map.get(x, 0.0))
+    # --- Per-card diversity features (fraud uses fewer merchants; new merchant = suspicious) ---
+    df["cust_n_merchants_train"] = df[cust_col].map(state.get("cust_n_merchants", {})).fillna(state.get("global_n_merchants", 5.0))
+    df["cust_n_categories_train"] = df[cust_col].map(state.get("cust_n_categories", {})).fillna(5.0)
 
-        # Amount z-score vs own card history
-        card_std_safe = df["card_std_amt"].replace(0, global_std)
-        df["amt_zscore_card"] = (df["TransactionAmt"] - df["card_mean_amt"]) / card_std_safe
-        # Drop weak/redundant behavioral features
-        df = df.drop(columns=["card_max_amt", "card_std_amt", "card_median_amt", "card_tx_count"], errors="ignore")
-        # Drop amt_vs_card_median (less informative than zscore)
-        # Don't compute it
+    # --- Demographic features ---
+    if "city_pop" in df.columns:
+        df["log_city_pop"] = np.log1p(df["city_pop"])
+        # Relative amount for city size (large txn in small city = more suspicious)
+        df["amt_per_city_pop"] = df[amt_col] / df["city_pop"].clip(lower=1)
 
-    # Number of unique merchants per card
-    if "card_id" in df.columns:
-        cc_keys2 = df["card_id"].astype(str)
-        card_merch_map = state.get("card_n_merchants", {})
-        df["card_n_merchants"] = cc_keys2.apply(lambda x: card_merch_map.get(x, 1))
-        card_night_map = state.get("card_night_ratio", {})
-        df["card_night_ratio"] = cc_keys2.apply(lambda x: card_night_map.get(x, 0.0))
-        card_ncat_map = state.get("card_n_categories", {})
-        df["card_n_categories"] = cc_keys2.apply(lambda x: card_ncat_map.get(x, 1))
-
-    # Remove card_id and high-cardinality noisy cols after features built
-    drop_noise = ["card_id", "city"]
-    df = df.drop(columns=[c for c in drop_noise if c in df.columns])
-
-    # --- Amount vs category median ---
-    if "category" in df.columns and "TransactionAmt" in df.columns:
-        global_amt_mean = state.get("global_amt_mean", 1.0)
-        cat_median_map = state.get("cat_median_amt", {})
-        cat_median_vals = df["category"].apply(lambda x: cat_median_map.get(str(x), global_amt_mean))
-        df["amt_vs_cat_median"] = df["TransactionAmt"] / cat_median_vals.replace(0, global_amt_mean)
-
-    # --- Target encoding: category ---
-    if "category" in df.columns:
-        te_map = state.get("category_te", {})
-        global_mean = state.get("global_mean", 0.0)
-        df["category_te"] = df["category"].apply(lambda x: te_map.get(str(x), global_mean))
-        df = df.drop(columns=["category"])
-
-    # --- Target encoding: merchant + merchant volume ---
-    if "merchant" in df.columns:
-        te_map = state.get("merchant_te", {})
-        global_mean = state.get("global_mean", 0.0)
-        merch_vol_map = state.get("merchant_volume", {})
-        df["merchant_te"] = df["merchant"].apply(lambda x: te_map.get(str(x), global_mean))
-        df["merchant_volume"] = df["merchant"].apply(lambda x: float(merch_vol_map.get(str(x), 0)))
-        df = df.drop(columns=["merchant"])
-
-    # Frequency encoding for remaining categoricals
-    for col in state.get("cat_cols", []):
-        if col in df.columns:
-            freq_map = state.get(f"{col}_freq", {})
-            df[f"{col}_freq_enc"] = df[col].apply(lambda x: freq_map.get(str(x), 0.0))
-            df = df.drop(columns=[col])
-
-    # --- Interaction features (keep only strongest, drop weak zscore_x_dist) ---
-    if "is_night" in df.columns and "home_merch_dist" in df.columns:
-        df["night_x_dist"] = df["is_night"] * df["home_merch_dist"]
-    if "category_te" in df.columns and "amt_zscore_card" in df.columns:
-        df["cate_te_x_zscore"] = df["category_te"] * df["amt_zscore_card"]
-    # Drop log_home_merch_dist (correlated with home_merch_dist)
+    # Drop remaining object columns
+    for col in df.select_dtypes("object").columns:
+        df = df.drop(columns=[col])
 
     return df.fillna(-1)

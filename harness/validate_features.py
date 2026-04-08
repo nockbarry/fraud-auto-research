@@ -166,6 +166,14 @@ def validate(
         if not passed:
             all_passed = False
 
+    # Target encoding overfit detection (advisory — does not block)
+    if "label" in df_train.columns and "label" in df_val.columns:
+        te_warnings = _check_te_overfit(
+            df_train, df_train["label"], df_val, df_val["label"]
+        )
+        for w in te_warnings:
+            messages.append(f"WARNING: {w}")
+
     return all_passed, messages
 
 

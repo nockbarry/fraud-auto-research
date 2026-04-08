@@ -2,6 +2,8 @@ results.tsv
 experiments/
 experiments_run3_seeded/
 experiments_archive_*/
+experiments_*_archive/
+archive/
 data/
 data_cache/
 agent_runs/

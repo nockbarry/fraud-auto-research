@@ -1,4 +1,4 @@
-"""FDH model. Agent-editable."""
+"""Baseline model for IEEE-CIS fresh track. Agent-editable."""
 import xgboost as xgb
 from harness.utils import get_gpu_info
 
@@ -8,14 +8,20 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     pos = int(y_train.sum())
     neg = int(len(y_train) - pos)
     model = xgb.XGBClassifier(
-        n_estimators=1000,
-        max_depth=6,
-        learning_rate=0.05,
+        n_estimators=3000,
+        max_depth=5,
+        learning_rate=0.02,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=10,
+        reg_alpha=0.1,
+        reg_lambda=2.0,
+        gamma=0.1,
         scale_pos_weight=neg / max(pos, 1),
         tree_method=gpu["tree_method"],
         device=gpu["device"],
         eval_metric="aucpr",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
         random_state=42,
     )
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
