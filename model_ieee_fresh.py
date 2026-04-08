@@ -8,20 +8,20 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     pos = int(y_train.sum())
     neg = int(len(y_train) - pos)
     model = xgb.XGBClassifier(
-        n_estimators=3000,
-        max_depth=5,
-        learning_rate=0.02,
+        n_estimators=5000,
+        max_depth=6,
+        learning_rate=0.01,
         subsample=0.8,
         colsample_bytree=0.8,
-        min_child_weight=10,
-        reg_alpha=0.1,
-        reg_lambda=2.0,
-        gamma=0.1,
+        min_child_weight=15,
+        reg_alpha=0.3,
+        reg_lambda=3.0,
+        gamma=0.3,
         scale_pos_weight=neg / max(pos, 1),
         tree_method=gpu["tree_method"],
         device=gpu["device"],
         eval_metric="aucpr",
-        early_stopping_rounds=100,
+        early_stopping_rounds=150,
         random_state=42,
     )
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)

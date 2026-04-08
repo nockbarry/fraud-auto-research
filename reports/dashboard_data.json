@@ -160,15 +160,15 @@
     },
     "ieee-cis-fresh": {
       "dataset": "ieee-cis-fresh",
-      "total": 13,
-      "kept": 5,
-      "discarded": 8,
-      "best_auprc_val": 0.344391,
-      "best_auprc_oot": 0.280797,
+      "total": 21,
+      "kept": 11,
+      "discarded": 10,
+      "best_auprc_val": 0.388475,
+      "best_auprc_oot": 0.307712,
       "baseline_auprc": 0.229748,
-      "improvement_pct": 22.21956230304507,
-      "best_composite": 0.139304,
-      "sota_hypothesis": "model-depth campaign step 2: XGBoost max_depth=5, lr=0.02, n_est=3000, gamma=0.1, reg_lambda=2.0 \u2014 deeper trees with stronger regularization on SOTA features",
+      "improvement_pct": 33.934571791702204,
+      "best_composite": 0.167015,
+      "sota_hypothesis": "final-model campaign step 1: deeper XGBoost max_depth=6, lr=0.01, n_est=5000, stronger regularization (lambda=3, alpha=0.3, gamma=0.3) on SOTA 88-feature set",
       "experiments": [
         {
           "id": "exp_000",
@@ -325,6 +325,102 @@
           "composite": 0.139304,
           "psi": 0.006012,
           "n_features": 66
+        },
+        {
+          "id": "exp_013",
+          "status": "keep",
+          "hypothesis": "amount-features campaign step 1: per-card1 amt baseline (mean/std/count) + amt zscore/ratio + log_amt + is_round + card6_amt_zscore",
+          "auprc_val": 0.358913,
+          "auprc_oot": 0.275199,
+          "auroc_val": 0.856799,
+          "auroc_oot": 0.822408,
+          "composite": 0.148055,
+          "psi": 0.003989,
+          "n_features": 75
+        },
+        {
+          "id": "exp_014",
+          "status": "keep",
+          "hypothesis": "amount-features campaign step 2: addr1 amount baseline (mean/std/count/zscore) + r_email_amt_ratio \u2014 building on amt_is_round/cents from exp_013",
+          "auprc_val": 0.360318,
+          "auprc_oot": 0.271399,
+          "auroc_val": 0.85908,
+          "auroc_oot": 0.825087,
+          "composite": 0.149488,
+          "psi": 0.005022,
+          "n_features": 80
+        },
+        {
+          "id": "exp_015",
+          "status": "discard",
+          "hypothesis": "card1-TE campaign step 1: add OOF smoothed TE for card1 (primary card identifier, min_samples=10) alongside existing features",
+          "auprc_val": 0.339735,
+          "auprc_oot": 0.228103,
+          "auroc_val": 0.835135,
+          "auroc_oot": 0.789182,
+          "composite": 0.124693,
+          "psi": 0.005565,
+          "n_features": 81
+        },
+        {
+          "id": "exp_016",
+          "status": "keep",
+          "hypothesis": "interaction campaign step 1: ProductCD\u00d7card6 freq + card4\u00d7card6 freq + dist1_log transform",
+          "auprc_val": 0.363472,
+          "auprc_oot": 0.285051,
+          "auroc_val": 0.859594,
+          "auroc_oot": 0.82722,
+          "composite": 0.1522,
+          "psi": 0.004873,
+          "n_features": 83
+        },
+        {
+          "id": "exp_017",
+          "status": "keep",
+          "hypothesis": "interaction campaign step 2: add R_emaildomain\u00d7card6 + R_emaildomain\u00d7ProductCD + addr1\u00d7card6 interaction freqs (building on productcd_card6_freq from exp_016)",
+          "auprc_val": 0.369636,
+          "auprc_oot": 0.279639,
+          "auroc_val": 0.861563,
+          "auroc_oot": 0.826993,
+          "composite": 0.156605,
+          "psi": 0.005535,
+          "n_features": 86
+        },
+        {
+          "id": "exp_018",
+          "status": "keep",
+          "hypothesis": "interaction campaign step 3: P_emaildomain\u00d7card6 + id12\u00d7card6 + card3_quantile\u00d7card6 interactions (building on r_email\u00d7card6 from exp_017)",
+          "auprc_val": 0.373737,
+          "auprc_oot": 0.291125,
+          "auroc_val": 0.862977,
+          "auroc_oot": 0.82557,
+          "composite": 0.157619,
+          "psi": 0.004735,
+          "n_features": 88
+        },
+        {
+          "id": "exp_019",
+          "status": "discard",
+          "hypothesis": "interaction campaign step 4: id29\u00d7card6 + id35\u00d7ProductCD + addr1_quantile\u00d7R_emaildomain interactions (building on 5-exp keep streak)",
+          "auprc_val": 0.370076,
+          "auprc_oot": 0.290226,
+          "auroc_val": 0.862291,
+          "auroc_oot": 0.824405,
+          "composite": 0.156086,
+          "psi": 0.004936,
+          "n_features": 90
+        },
+        {
+          "id": "exp_020",
+          "status": "keep",
+          "hypothesis": "final-model campaign step 1: deeper XGBoost max_depth=6, lr=0.01, n_est=5000, stronger regularization (lambda=3, alpha=0.3, gamma=0.3) on SOTA 88-feature set",
+          "auprc_val": 0.388475,
+          "auprc_oot": 0.307712,
+          "auroc_val": 0.867971,
+          "auroc_oot": 0.83312,
+          "composite": 0.167015,
+          "psi": 0.004754,
+          "n_features": 88
         }
       ]
     },
@@ -622,15 +718,15 @@
     },
     "ieee-cis": {
       "dataset": "ieee-cis",
-      "total": 28,
-      "kept": 8,
-      "discarded": 20,
-      "best_auprc_val": 0.345289,
-      "best_auprc_oot": 0.26426,
+      "total": 36,
+      "kept": 9,
+      "discarded": 27,
+      "best_auprc_val": 0.36887,
+      "best_auprc_oot": 0.276131,
       "baseline_auprc": 0.229748,
-      "improvement_pct": 15.021675923185395,
-      "best_composite": 0.149989,
-      "sota_hypothesis": "amount-patterns campaign step 2/3: add anomaly score (Mahalanobis distance from training centroid, Recipe 6) on top of exp_024 SOTA; 20 PSI-safe numeric features, captures unusual transaction profiles",
+      "improvement_pct": 20.188641468043244,
+      "best_composite": 0.151913,
+      "sota_hypothesis": "model-tuning campaign step 3/3: max_depth=5 with stronger regularization (gamma=1.5, reg_lambda=7.0) to compensate; 77 features may benefit from more expressive trees with stronger L2",
       "experiments": [
         {
           "id": "exp_000",
@@ -967,9 +1063,105 @@
           "composite": 0.146198,
           "psi": 0.008957,
           "n_features": 81
+        },
+        {
+          "id": "exp_028",
+          "status": "discard",
+          "hypothesis": "email-agg campaign step 1/3: R_emaildomain aggregations (mean/std amt per domain, card1 distinct per domain); ~60 unique email domains, PSI-stable; email_card_distinct captures compromised email domains",
+          "auprc_val": 0.341985,
+          "auprc_oot": 0.245008,
+          "auroc_val": 0.854552,
+          "auroc_oot": 0.828859,
+          "composite": 0.145859,
+          "psi": 0.009442,
+          "n_features": 83
+        },
+        {
+          "id": "exp_029",
+          "status": "discard",
+          "hypothesis": "identity-consistency campaign step 1/3: per-card1 modal identity profile (P_email/R_email/DeviceType match flags) + entity sharing counts (n_cards per email domain); Recipe 4 - 'new device + new email = suspicious'",
+          "auprc_val": 0.345631,
+          "auprc_oot": 0.257764,
+          "auroc_val": 0.856752,
+          "auroc_oot": 0.831577,
+          "composite": 0.149514,
+          "psi": 0.008949,
+          "n_features": 86
+        },
+        {
+          "id": "exp_030",
+          "status": "discard",
+          "hypothesis": "identity-consistency campaign step 2/3: entity sharing only \u2014 n_cards sharing same R_emaildomain/P_emaildomain/DeviceType; fraud rings share infrastructure; stateless about card1 so less temporal drift vs profile matching",
+          "auprc_val": 0.343187,
+          "auprc_oot": 0.260607,
+          "auroc_val": 0.856026,
+          "auroc_oot": 0.832371,
+          "composite": 0.147172,
+          "psi": 0.009375,
+          "n_features": 82
+        },
+        {
+          "id": "exp_031",
+          "status": "discard",
+          "hypothesis": "model-tuning campaign step 1/3: n_estimators=3000, lr=0.02 (from 2000/0.03); lower LR + more trees for better convergence; train_val_psi was 0.014 suggesting slight overfit headroom",
+          "auprc_val": 0.337987,
+          "auprc_oot": 0.256828,
+          "auroc_val": 0.8557,
+          "auroc_oot": 0.829341,
+          "composite": 0.144969,
+          "psi": 0.008705,
+          "n_features": 79
+        },
+        {
+          "id": "exp_032",
+          "status": "discard",
+          "hypothesis": "model-tuning campaign step 2/3: stronger regularization \u2014 subsample=0.75, colsample=0.65, min_child_weight=15, gamma=1.5, reg_lambda=7.0; reduce overfit given train_auroc_gap=0.097",
+          "auprc_val": 0.337458,
+          "auprc_oot": 0.260511,
+          "auroc_val": 0.85759,
+          "auroc_oot": 0.83188,
+          "composite": 0.1462,
+          "psi": 0.008928,
+          "n_features": 79
+        },
+        {
+          "id": "exp_033",
+          "status": "discard",
+          "hypothesis": "addr1-agg campaign step 1/3: addr1 aggregations (mean/std/count amt + distinct R_emaildomain + distinct card1 per addr1); 318 unique addr1 values, stable entity; geographic fraud pattern capture",
+          "auprc_val": 0.343393,
+          "auprc_oot": 0.256276,
+          "auroc_val": 0.855249,
+          "auroc_oot": 0.82848,
+          "composite": 0.148929,
+          "psi": 0.009119,
+          "n_features": 84
+        },
+        {
+          "id": "exp_034",
+          "status": "keep",
+          "hypothesis": "model-tuning campaign step 3/3: max_depth=5 with stronger regularization (gamma=1.5, reg_lambda=7.0) to compensate; 77 features may benefit from more expressive trees with stronger L2",
+          "auprc_val": 0.36887,
+          "auprc_oot": 0.276131,
+          "auroc_val": 0.863331,
+          "auroc_oot": 0.831471,
+          "composite": 0.151913,
+          "psi": 0.006987,
+          "n_features": 79
+        },
+        {
+          "id": "exp_035",
+          "status": "discard",
+          "hypothesis": "model-tuning campaign + psi-fix: max_depth=5 (gamma=1.5, reg_lambda=7.0) + drop TransactionID (PSI=12.43 leakage); combining exp_034 model gains with exp_021 leakage fix for better OOT generalization",
+          "auprc_val": 0.361171,
+          "auprc_oot": 0.287265,
+          "auroc_val": 0.861283,
+          "auroc_oot": 0.828175,
+          "composite": 0.149461,
+          "psi": 0.007181,
+          "n_features": 78
         }
       ]
     }
   },
-  "last_updated": "2026-04-08T00:43:59.114333"
+  "last_updated": "2026-04-08T00:58:59.621414"
 }

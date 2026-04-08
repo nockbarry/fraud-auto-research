@@ -31,10 +31,13 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
     # columns (id_01-38, DeviceInfo, R_emaildomain) whose null pattern is highly
     # predictive — id_17 IV=0.35, id_30 IV=0.62, DeviceInfo IV=1.78.
     # Drop only: constant columns (n_unique<=1) OR near-empty (>99% NaN with <=5 levels).
+    # Also explicitly drop TransactionID (auto-increment, PSI=12.43, temporal leakage).
     nan_rates = df_train.isnull().mean()
     n_unique = df_train.nunique(dropna=True)
     drop_mask = (n_unique <= 1) | ((nan_rates > 0.99) & (n_unique <= 5))
-    state["drop_cols"] = nan_rates[drop_mask].index.tolist()
+    base_drops = set(nan_rates[drop_mask].index.tolist())
+    base_drops.add("TransactionID")
+    state["drop_cols"] = list(base_drops)
     df_tmp = df_train.drop(columns=state["drop_cols"], errors="ignore")
 
     # Identity-cluster presence flag. The id_* columns share a ~98% correlated
@@ -97,19 +100,6 @@ def fit(df_train: pd.DataFrame, y_train: pd.Series, config: dict) -> dict:
                 str(k): int(v) for k, v in uid_grp["ProductCD"].nunique().items()
             }
 
-    # Campaign 6 Step 1: R_emaildomain aggregations.
-    # R_emaildomain is the #1 feature (TE importance 0.081). Aggregate amount stats per domain.
-    # Email domains have ~60 unique values — stable aggregation without overfitting.
-    if "R_emaildomain" in df_tmp.columns:
-        email_grp = df_tmp.groupby("R_emaildomain")["TransactionAmt"]
-        state["email_amt_mean"] = {str(k): float(v) for k, v in email_grp.mean().items()}
-        state["email_amt_std"] = {str(k): float(v) for k, v in email_grp.std().fillna(0).items()}
-        state["email_txn_count"] = {str(k): int(v) for k, v in email_grp.count().items()}
-        # card1 diversity per email domain (many unique cards using same domain = suspicious)
-        if "card1" in df_tmp.columns:
-            card_per_email = df_tmp.groupby("R_emaildomain")["card1"].nunique()
-            state["email_card_distinct"] = {str(k): int(v) for k, v in card_per_email.items()}
-
     # Campaign 2 Step 3: Per-card1 velocity features (Recipe 2).
     # card1 is more stable than UID for velocity because velocity stats summarize the
     # entire card history (gap distribution), not individual transactions.
@@ -157,15 +147,6 @@ def transform(df: pd.DataFrame, state: dict, config: dict) -> pd.DataFrame:
             freq_map = state.get(f"{col}_freq", {})
             df[f"{col}_freq_enc"] = df[col].apply(lambda x: freq_map.get(str(x), 0.0))
             df = df.drop(columns=[col])
-
-    # --- R_emaildomain aggregations (Campaign 6 Step 1) ---
-    # R_emaildomain is dropped after TE, so use the original col from df_copy before TE drop.
-    # We need to map using R_emaildomain before it gets dropped.
-    # NOTE: by this point R_emaildomain is already dropped (TE applied).
-    # We can track email via the TE value itself — or better: look up using original raw col.
-    # Actually R_emaildomain is already in te_replace_cols, so it's dropped.
-    # Workaround: store email aggs keyed by the TE value (continuous) is not possible.
-    # Solution: compute before TE drop by adding email lookup at start of transform.
 
     # --- UID aggregation features (Campaign 2 Step 1) ---
     if "card1" in df.columns and "addr1" in df.columns:

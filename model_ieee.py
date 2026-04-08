@@ -9,13 +9,13 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     neg = int(len(y_train) - pos)
     model = xgb.XGBClassifier(
         n_estimators=2000,
-        max_depth=4,           # reduced from 6 to reduce overfit (train_val_psi was 0.29)
+        max_depth=5,           # +1 depth: 77 features now, more capacity needed
         learning_rate=0.03,    # lower LR with more trees
         subsample=0.80,        # row subsampling
         colsample_bytree=0.70, # feature subsampling per tree
         min_child_weight=10,   # fewer splits in small nodes (reduces memorization)
-        gamma=1.0,             # min gain to split
-        reg_lambda=5.0,        # L2 regularization
+        gamma=1.5,             # slightly higher min gain to compensate for depth
+        reg_lambda=7.0,        # stronger L2 to compensate for depth
         scale_pos_weight=neg / max(pos, 1),
         tree_method=gpu["tree_method"],
         device=gpu["device"],

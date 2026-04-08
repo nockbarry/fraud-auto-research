@@ -1,7 +1,7 @@
 # Journal: ieee-cis-fresh (Track B)
 
 ## Current Thesis (max 5 sentences)
-IEEE-CIS is CNP fraud with 57 raw columns. The identity cluster (id_01-38, DeviceInfo, R_emaildomain) is the dominant raw signal — their null pattern (null_AUC ~0.65) indicates "was identity collected" and DeviceInfo has IV=1.78. SOTA has regularized XGBoost (max_depth=4) + cyclic time features (hour/dow from TransactionDT mod 86400). Next priority: add entity-sharing (identity consistency) and interaction features between high-IV identity columns. The freq encoding approach works well; focus on adding stable cross-entity signals.
+IEEE-CIS is CNP fraud with 57 raw columns. The identity cluster freq encodings + interaction frequencies (R_email×card6, ProductCD×card6, id12×card6) are the dominant engineered features. SOTA: max_depth=6 XGBoost with 88 features, AUPRC_val=0.388, composite=0.167. Key unlocks: (1) regularization+drop TransactionDT, (2) cyclic time features, (3) identity consistency, (4) amount features + amt_is_round, (5) interaction frequencies, (6) deeper model. Target encoding consistently failed; freq encoding + interaction freq is the winning approach here.
 
 ## Active Campaign
 - Goal: Regularization → TE → UID aggs → velocity stack (20-exp campaign)
@@ -44,6 +44,14 @@ IEEE-CIS is CNP fraud with 57 raw columns. The identity cluster (id_01-38, Devic
 - DISCOVERY: id_29/id_35/id_36-38 are binary (Found/NotFound, T/F) — freq encoding loses the actual binary signal! id_30=OS, id_31=browser, id_33=screen are high-card (71/108/183 levels) — need TE. id_23=proxy type is a direct fraud signal.
 - exp_011: Binary id_* → 0/1 + id_30/31/33/DeviceInfo → TE → FAILED, AUPRC 0.218 (-0.015). TE on 85%+ NaN columns collapses to global_mean. Freq encoding of binary cols actually works fine (gives slight variant signal). DO NOT TE identity columns.
 - exp_012: Deeper XGBoost (max_depth=5, lr=0.02, n_est=3000, gamma=0.1, lambda=2.0) → KEPT, AUPRC_val 0.319→0.344 (+8%), composite 0.1353→0.1393. Deeper trees extract more from existing features. Model capacity improvement.
+- exp_013: Amount features (card1_amt_zscore/ratio, log_amt, amt_is_round, amt_cents, card6_zscore) → KEPT, AUPRC_val 0.344→0.359 (+4.5%), composite 0.1393→0.1481. amt_is_round and amt_cents are top features! Round amounts are a direct fraud signal.
+- exp_014: addr1 amount baseline + r_email_amt_ratio → KEPT, AUPRC_val 0.359→0.360 (+0.4%), composite 0.1481→0.1495. Marginal but positive. amt_is_round/cents persist as top features.
+- exp_015: card1 OOF TE (min_samples=10) → discarded, composite 0.1247. TE GRAVEYARD: card1/R_emaildomain/id_30/31/33 all failed with TE. XGBoost handles numeric card1 natively; freq encoding is better for categoricals here.
+- exp_016: Interaction freq (ProductCD×card6, card4×card6) + dist1_log → KEPT, AUPRC_val 0.360→0.364 (+1%), composite 0.1495→0.1522. productcd_card6_freq importance=0.081! Product type × payment method interaction is highly predictive.
+- exp_017: More interaction freqs (R_email×card6, R_email×ProductCD, addr1×card6) → KEPT, AUPRC_val 0.364→0.370 (+1.7%), composite 0.1522→0.1566. r_email_card6_freq importance=0.073. 4 consecutive keeps! Interaction campaign delivering consistent gains.
+- exp_018: P_email×card6 + id12×card6 + card3_quant×card6 → KEPT, AUPRC_val 0.370→0.374, composite 0.1566→0.1576. id12_card6_freq importance=0.046. 5 consecutive keeps.
+- exp_019: id29×card6 + id35×ProductCD + addr1_q×R_email → discarded, composite 0.1561 (-0.001). id_29/35 already captured by their own freq encodings; marginal interactions aren't adding unique signal.
+- exp_020 (FINAL): max_depth=6, lr=0.01, n_est=5000, reg_lambda=3, gamma=0.3 → KEPT, AUPRC_val 0.374→0.388 (+4%), AUPRC_oot 0.291→0.308 (+6%), composite 0.1576→0.1670. Deeper trees with lower lr squeeze more from 88-feature set. BEST SCORE.
 
 ## Discarded Theses (graveyard, max 5)
 - (fresh start)
