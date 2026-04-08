@@ -1,7 +1,7 @@
 # PaySim Mobile Money Fraud — synthetic mobile money transaction data
 dataset_name: "paysim"
-features_file: "features_paysim.py"
-model_file: "model_paysim.py"
+features_file: "datasets/paysim/features.py"
+model_file: "datasets/paysim/model.py"
 dataset_description: "PaySim synthetic mobile money transactions, 6.3M txns, fraud only in TRANSFER/CASH_OUT types, 0.13% fraud rate"
 
 local_data:

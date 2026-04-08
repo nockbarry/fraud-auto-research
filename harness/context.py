@@ -154,10 +154,10 @@ def _load_journal(dataset: str) -> str | None:
     Truncated at 4 KB to bound context size and force the agent to prune.
     """
     candidates = [
+        Path(f"journals/{dataset}.md"),
+        Path(f"journals/{dataset.replace('-', '_')}.md"),
+        # legacy fallback (pre-cleanup): top-level journal_<dataset>.md
         Path(f"journal_{dataset}.md"),
-        Path(f"journal_{dataset.replace('-', '_')}.md"),
-        Path(f"journal_{dataset.replace('-cis', '')}.md"),  # ieee-cis -> ieee
-        Path(f"journal_{dataset.replace('fraud-', '')}.md"),  # fraud-sim -> sim
     ]
     seen = set()
     for p in candidates:
@@ -170,6 +170,22 @@ def _load_journal(dataset: str) -> str | None:
                 text = text[:4096] + "\n... [journal truncated at 4 KB — PRUNE IT]"
             return text
     return None
+
+
+def _load_practices_index() -> str | None:
+    """Load the fraud_practices.md index, if it exists.
+
+    The agent should read this index then call Read with offset/limit on
+    the full fraud_practices.md to pull only relevant sections (instead of
+    reading the whole 100 KB file every experiment).
+    """
+    p = Path("fraud_practices_index.md")
+    if not p.exists():
+        return None
+    text = p.read_text()
+    if len(text) > 6144:
+        text = text[:6144] + "\n... [index truncated at 6 KB]"
+    return text
 
 
 _CAMPAIGN_PAT = re.compile(
@@ -226,9 +242,18 @@ def generate_context(dataset: str) -> str:
         lines.append("")
     else:
         lines.append(
-            f"\nAGENT JOURNAL: <none yet — create journal_{dataset}.md with sections: "
+            f"\nAGENT JOURNAL: <none yet — create journals/{dataset}.md with sections: "
             f"Current Thesis, Active Campaign, Open Questions, Lessons Learned, Discarded Theses>"
         )
+
+    # Knowledge index — agent reads this, then uses Read with offset/limit
+    # on fraud_practices.md to pull only the sections it needs.
+    practices_idx = _load_practices_index()
+    if practices_idx:
+        lines.append("")
+        lines.append("KNOWLEDGE INDEX (use `Read fraud_practices.md offset=N limit=M` to pull a section):")
+        lines.append(practices_idx)
+        lines.append("")
 
     # Per-column univariate analysis — surfaces raw signals the agent might be ignoring
     try:

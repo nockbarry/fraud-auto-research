@@ -2,8 +2,8 @@
 # Source: https://github.com/Fraud-Detection-Handbook/simulated-data-raw
 # Companion book: https://fraud-detection-handbook.github.io/fraud-detection-handbook/
 dataset_name: "fdh"
-features_file: "features_fdh.py"
-model_file: "model_fdh.py"
+features_file: "datasets/fdh/features.py"
+model_file: "datasets/fdh/model.py"
 dataset_description: "FDH simulated card transactions, 1.75M txns, 4990 customers, 10000 terminals, 3 fraud scenarios, 0.84% fraud rate"
 
 local_data:

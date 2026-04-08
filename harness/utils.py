@@ -8,15 +8,15 @@ from pathlib import Path
 import yaml
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = ROOT_DIR / "config.yaml"
 DEFAULT_TSV_PATH = ROOT_DIR / "results.tsv"
 
 TSV_HEADER = "commit\tcomposite\tauprc\tprec@recall\tpsi\tstatus\tdataset\thypothesis"
 
 
 def load_config(path: str | Path | None = None) -> dict:
-    """Load config.yaml and return as dict."""
-    path = Path(path) if path else DEFAULT_CONFIG_PATH
+    """Load a dataset config YAML from configs/<name>.yaml."""
+    if not path:
+        raise ValueError("load_config requires an explicit path (e.g. configs/ieee-cis.yaml)")
     with open(path) as f:
         return yaml.safe_load(f)
 

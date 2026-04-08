@@ -1,11 +1,136 @@
-# Fraud Detection: Datasets & Feature Engineering Reference
+# Fraud Detection: Datasets, Feature Engineering & Model Design Reference
 
-A practical reference for LLM-driven autonomous feature engineering on transaction data.
-Covers public datasets, fraud type taxonomy, concrete feature formulas, and generalization considerations.
+A practical reference for LLM-driven autonomous feature engineering and model development on transaction data.
+Covers public datasets, fraud type taxonomy, concrete feature formulas, state-of-the-art model architectures, foundation models, competition-validated techniques, and production deployment patterns.
+
+**Last updated:** April 2026. Incorporates findings from TabPFN-2.5, Stripe's Payments Foundation Model, TALENT/TabArena benchmarks, IEEE-CIS and AmEx competition post-mortems, and the Grinsztajn et al./McElfresh et al. GBDT-vs-DL debate.
 
 ---
 
-## Part 1: Public Fraud Detection Datasets
+## Part 1: The Current Landscape — What Actually Works
+
+### 1.1 The GBDT vs. Deep Learning Debate (Resolved, Mostly)
+
+The central question in tabular fraud ML — whether gradient-boosted trees or neural networks perform better — has been extensively benchmarked. The answer is nuanced but actionable.
+
+**The foundational papers:**
+- **Grinsztajn, Oyallon, Varoquaux (NeurIPS 2022):** "Why do tree-based models still outperform deep learning on tabular data?" identified three structural NN disadvantages: sensitivity to uninformative features, failure to preserve data orientation, and difficulty learning irregular target functions.
+- **McElfresh et al. (NeurIPS 2023):** Tested 19 algorithms across 176 datasets and concluded the NN-vs-GBDT debate is **overemphasized** — on many datasets, the gap is negligible with proper tuning.
+- **TALENT benchmark (Ye et al., 2024, revised Nov 2025):** Evaluated 300+ datasets; tree ensembles remain highly competitive, but top DL architectures (TabPFN v2, TabICL, RealMLP, TabR, ModernNCA) now match or exceed GBDTs on significant subsets.
+- **TabArena (NeurIPS 2025):** Living benchmark confirming deep learning has closed the gap with sufficient time budgets and ensembling.
+
+**The practical hierarchy for fraud detection:**
+
+For **production real-time scoring** (sub-100ms latency, billions of transactions): **XGBoost/LightGBM/CatBoost** remain dominant. They deliver sub-millisecond inference, support SHAP-based explainability required by GDPR and PCI-DSS, handle class imbalance natively via `scale_pos_weight`, and retrain daily as fraudsters evolve. The performance gap between these three libraries is statistically insignificant per TALENT — library choice is secondary to feature engineering quality.
+
+For **offline enrichment and embedding generation**: Foundation models and transformers excel. Stripe's Payments Foundation Model, Featurespace's NPPR, and graph neural networks generate dense behavioral embeddings that become input features for the GBDT classifier.
+
+For **small-to-medium datasets** (<10K–50K samples): **TabPFN-2.5** achieves a near-100% win rate against default XGBoost on classification datasets under 10K samples, matching a 4-hour AutoGluon ensemble in 2.8 seconds. This is the right starting point when labeled fraud data is scarce.
+
+**Deep learning architectures that underperformed expectations:**
+- **TabNet** (Google, 2021): High variability and lack of robustness per TALENT.
+- **SAINT**: Inconsistent gains from intersample attention.
+- **NODE** (Neural Oblivious Decision Ensembles): Superseded by simpler methods.
+- **FT-Transformer**: Competitive on specific datasets but doesn't consistently beat GBDTs.
+
+**What does work in deep learning for tabular:**
+- **TabM** (Gorishniy et al., ICLR 2025, Yandex Research): Best average rank across 46 datasets using parameter-efficient MLP ensembling. The key finding: "the complexity of attention- and retrieval-based methods does not pay off."
+- **RealMLP**: A "bag of tricks for MLPs" approach that's competitive with far less complexity than transformers.
+- **ModernNCA**: Retrieval-augmented approach using nearest-neighbor classification with learned embeddings.
+
+**Agent implication:** Default to XGBoost/LightGBM. Invest effort in feature engineering over model architecture. Consider TabPFN-2.5 for small datasets. Use deep learning for embedding generation, not as the final classifier.
+
+---
+
+### 1.2 Foundation Models for Tabular Data
+
+The most significant 2024–2026 development is foundation models that perform in-context learning without per-dataset training.
+
+**TabPFN (Prior-Fitted Networks) — Prior Labs / Hollmann, Müller, Hutter:**
+- **v1** (ICLR 2023): Limited to 1,000 rows, 100 numerical features
+- **v2** (Nature, Jan 2025): 10K rows, 500 features, categoricals, missing values, regression — matching 4-hour AutoGluon in 2.8 seconds
+- **v2.5** (Nov 2025): 50K rows, 2K features, 20× data capacity increase, 87% win rate vs. tuned XGBoost on datasets up to 100K samples
+- **v2.6** (Enterprise): Up to 10M rows via distillation to compact MLPs or trees
+
+H2O.ai testing showed TabPFN achieving **73% recall** vs. LightGBM's 47% on insurance fraud with extreme class imbalance. Prior Labs lists automotive finance fraud as a production use case.
+
+**For fraud detection specifically:** TabPFN's size constraint (50K rows in v2.5) limits direct application to production fraud systems processing billions of transactions. However, the distillation engine in v2.6 compresses TabPFN's knowledge into deployable tree or MLP models. The most promising workflow: use TabPFN for rapid prototyping and feature importance analysis, then distill to a production-ready model.
+
+**Domain-specific foundation models:**
+- **Featurespace NPPR** (ACM ICAIF 2023): Pretrained on **5.1 billion transactions from 180 European banks** using a GRU architecture with next-event prediction and past-reconstruction objectives. Generates contextualized transaction embeddings that transfer across institutions.
+- **Feedzai RiskFM** (2025/2026): First tabular foundation model purpose-built for financial data. Uses Mixture of Experts with federated learning across institutions processing $8–9 trillion annually. Reportedly matches bespoke supervised models out-of-the-box.
+- **Stripe's Payments Foundation Model** (May 2025): Transformer that tokenizes each charge (card BIN, merchant category, amount, IP, device) and learns the "grammar of payments" via self-supervised pretraining. Card-testing detection improved from 59% to 97% overnight with no increase in false positives.
+
+**Other foundation model approaches:**
+- **CARTE** (Kim et al., 2024): Graph representations with pretrained text embeddings for cross-table transfer learning — promising for heterogeneous financial data sources.
+- **XTab** (ICML 2023): Cross-table pretraining via federated-style transformer decomposition.
+- **XTFormer** (2024): Beats XGBoost and CatBoost on 72% of 190 downstream tasks.
+- **UniPredict**: LLM as universal tabular predictor, 100%+ improvement over XGBoost in low-resource settings.
+- **TabICL** (2025): Scales in-context learning to 500K+ samples.
+
+**Agent implication:** Foundation model embeddings as features into XGBoost is the emerging dominant pattern. When available, use NPPR-style transaction embeddings or TabPFN distilled representations as additional input features alongside hand-engineered features.
+
+---
+
+### 1.3 Competition-Validated Techniques
+
+The most instructive evidence about what works comes from Kaggle competitions where thousands compete on identical datasets.
+
+**IEEE-CIS Fraud Detection (2019, 6,381 teams):**
+Winner: FraudSquad (including Chris Deotte). Private LB AUC: **0.9459**. Ensemble of XGBoost, CatBoost, LightGBM. The decisive breakthrough was feature engineering:
+- **UID construction**: `card1 + addr1 + D1` → unique client identifier. This single entity-resolution insight boosted local CV from ~0.90 to ~0.948.
+- **262 group-aggregation features**: Mean, std, count of transaction amounts and time deltas per client.
+- **D-column normalization**: Subtracting D1 from transaction day → "days since card first used."
+- **V-feature reduction**: Correlation-based removal of redundant Vesta-engineered features.
+- **Post-processing**: Replaced individual predictions with client-average predictions.
+
+**American Express Default Prediction (2022, 4,875 teams):**
+Winner: "jxzly" with 7-stage pipeline: denoise → manual features → series features → feature combination → LightGBM → neural network → weighted ensemble. Key: aggregating time-series billing data (190 features × monthly statements) into customer-level features using mean, std, min, max, last-value aggregations. Winning blend: LightGBM 65% + neural networks 25%. Chris Deotte placed 15th with a Transformer + LightGBM knowledge distillation approach.
+
+**Home Credit — Credit Risk Model Stability (2024):**
+Introduced Gini stability metric penalizing models that degrade over time. Winners used LightGBM + CatBoost with StratifiedGroupKFold by weekly temporal grouping. Rewarded robustness over peak accuracy.
+
+**Consistent patterns across all major tabular competitions (2024–2025):**
+- **GBDTs dominate**: 16 winning solutions used LightGBM in 2024 alone.
+- **Ensembling is mandatory**: Winners blend 10–70+ models. Chris Deotte won April 2025 Kaggle Playground with a 3-level stack of 72 models.
+- **Feature engineering is the primary differentiator**: Model architecture matters far less than feature quality.
+- **AutoGluon** appeared in 2 winning solutions in 2025, sometimes beating manually tuned ensembles.
+
+**Expert practitioners to follow:**
+- **Chris Deotte** — 4× Kaggle Grandmaster, NVIDIA. 1st in IEEE-CIS Fraud Detection. Canonical "XGB Fraud with Magic" notebook (0.9600 AUC). Advocates GPU-accelerated brute-force feature search via RAPIDS cuML.
+- **Gilberto Titericz Jr. (Giba)** — 13× Kaggle Grandmaster, formerly #1 worldwide. 2nd in IEEE-CIS.
+- **Jean-François Puget (CPMP)** — NVIDIA Distinguished Engineer, 2× Grandmaster. 2nd in IEEE-CIS. Leads NVIDIA's KGMoN team.
+- **Bojan Tunguz** — 4× Grandmaster, first Top 10 in all four Kaggle categories. Won Home Credit Default Risk (7,198 teams).
+- **Kazuki Onodera** — Deep learning expertise for structured data.
+- **NVIDIA KGMoN team** published "The Kaggle Grandmasters Playbook: 7 Battle-Tested Modeling Techniques for Tabular Data" (2025): smarter EDA, diverse baselines, massive feature engineering, hill-climbing ensembles, model stacking, pseudo-labeling, domain-specific training tricks.
+
+---
+
+### 1.4 What Production Systems Actually Deploy
+
+**Stripe Radar:** Processes $1.4T+ annually. Neural networks on billions of transactions. Assesses 1,000+ characteristics per transaction. Retrains daily. PFM produces dense behavioral embedding per transaction in <100ms. 92% of cards on network seen before, enabling cross-merchant intelligence.
+
+**Visa VAAI:** Scores 300 billion transactions/year using 500+ attributes. Generative AI trained on 15B+ VisaNet transactions with 6× more features than previous models. 85% FPR reduction. Blocked $40B in fraud in year ending Sept 2023.
+
+**Mastercard Decision Intelligence:** Scores 143 billion transactions/year in 50ms using proprietary RNN + transformer. Up to 300% improvement in fraud detection, 50% reduction in false declines. Uses graph + generative AI to predict full compromised card numbers from partial data.
+
+**JP Morgan Chase:** $9B+ invested in neural network development. TigerGraph for real-time graph analysis of 50M+ daily transactions with sub-80ms response. $50M savings from graph-based fraud detection. Project AIKYA: federated learning for cross-institutional fraud detection.
+
+**Capital One:** XGBoost/TensorFlow/PyTorch on AWS. Announced at KDD 2025 a strategic shift "From Features to Sequences" — transitioning from traditional feature-engineered GBDTs to transformer architectures.
+
+**PayPal:** Hybrid Random Forest + neural networks. Quokka shadow platform reduces model deployment time by 80%.
+
+**Consistent production patterns:**
+- Sub-100ms real-time scoring
+- 500–1,000+ features per transaction
+- Daily or more frequent retraining
+- Shadow/canary deployment environments
+- Hybrid: rules + ML models + foundation model embeddings
+- Class imbalance via massive data volume + cost-sensitive learning, **not** SMOTE (practitioners increasingly view SMOTE as problematic for heterogeneous fraud data)
+
+---
+
+## Part 2: Public Fraud Detection Datasets
 
 ### Dataset Selection Criteria
 
@@ -46,6 +171,7 @@ For autonomous feature engineering to be meaningful, a dataset needs:
   - Top solutions built UIDs from `card1 + addr1 + D1` to create customer proxies, then aggregated over them
 - **Raw engineering potential:** HIGH. Raw card/address/email/device attributes support velocity, graph, and behavioral features. D-columns hint at recency structure an agent can exploit.
 - **OOT split:** Yes — sort by `TransactionDT`, hold out the last ~20% of time.
+- **Competition winning techniques:** UID construction from card1+addr1+D1, 262 group-aggregation features, D-column normalization, V-feature correlation pruning, client-average post-processing. See Part 1.3 for details.
 
 ---
 
@@ -166,9 +292,9 @@ For autonomous feature engineering to be meaningful, a dataset needs:
 
 ---
 
-## Part 2: Fraud Detection Feature Engineering Reference
+## Part 3: Fraud Detection Feature Engineering Reference
 
-### 2.1 Fraud Type Taxonomy
+### 3.1 Fraud Type Taxonomy
 
 ---
 
@@ -370,9 +496,9 @@ mcc_never_seen = 1 if (customer_id, mcc) not in historical_customer_mcc_set else
 
 ---
 
-## Part 3: Cross-Cutting Feature Engineering Techniques
+## Part 4: Cross-Cutting Feature Engineering Techniques
 
-### 3.1 Velocity / Aggregation Windows
+### 4.1 Velocity / Aggregation Windows
 
 **Core pattern (RFM framework):**
 For entity E (card, customer, device, IP, merchant) over window W:
@@ -387,6 +513,8 @@ For entity E (card, customer, device, IP, merchant) over window W:
 **Recommended window sizes:**
 | Window | Use Case |
 |--------|----------|
+| 1 minute | Bot attacks, card testing (Stripe PFM detected card testing at this granularity) |
+| 5 minutes | Credential stuffing, scanning attacks |
 | 1 hour | Card testing, credential stuffing, rapid sequential fraud |
 | 4 hours | ATO spend-up detection |
 | 24 hours | Daily velocity limits, single-day bust patterns |
@@ -394,7 +522,7 @@ For entity E (card, customer, device, IP, merchant) over window W:
 | 30 days | Monthly spend profile, baseline for z-score |
 | 90 days | Long-term behavior profile, bust-out detection |
 
-**Why these windows matter:** The aggregation period accounts for ~88% of the variance in classifier performance across window experiments (albahnsen et al.). Short windows catch acute attacks; long windows establish the behavioral baseline.
+**Why these windows matter:** The aggregation period accounts for ~88% of the variance in classifier performance across window experiments (Bahnsen et al., 2016). Bahnsen demonstrated that aggregated features improve fraud detection by **200%+** versus raw features alone. Short windows catch acute attacks; long windows establish the behavioral baseline.
 
 **Concrete feature naming convention (from Fraud Detection Handbook):**
 ```
@@ -418,16 +546,22 @@ TERMINAL_RISK_7DAY = (
 )
 ```
 
-**The ratio trick:**
+**The ratio trick (competition-validated):**
 Raw counts don't normalize for customer frequency. Prefer:
 ```
 # Count in 1-day relative to 30-day baseline
 txn_freq_ratio_1d_30d = CARD_COUNT_TXN_1DAY / max(CARD_COUNT_TXN_30DAY / 30, 0.1)
 ```
 
+This ratio normalization was used extensively in both IEEE-CIS and AmEx winning solutions. The z-score variant is even more robust:
+```
+# Velocity z-score: how unusual is today's count vs. historical distribution?
+vel_zscore_1d = (CARD_COUNT_TXN_1DAY - CARD_AVG_DAILY_COUNT_30D) / max(CARD_STD_DAILY_COUNT_30D, 1.0)
+```
+
 ---
 
-### 3.2 Behavioral Profiling (Self-Deviation and Peer-Deviation)
+### 4.2 Behavioral Profiling (Self-Deviation and Peer-Deviation)
 
 **Deviation from self (intra-customer anomaly):**
 Compare current transaction to the customer's own history. Catches ATO, stolen card, and bust-out.
@@ -471,9 +605,12 @@ uid = str(card1) + '_' + str(addr1) + '_' + str(int(D1_normalized))
 CUSTOMER_PROXY_AVG_AMT_7D = transactions.groupby('uid')['TransactionAmt'].rolling('7D').mean()
 ```
 
+**Von Mises distribution features (Bahnsen et al.):**
+Model the circular statistics of transaction timing to detect purchases at unusual hours. Instead of raw hour-of-day, fit a von Mises distribution per customer to capture their typical transaction-time concentration and flag deviations from it.
+
 ---
 
-### 3.3 Entity Resolution / Graph Features
+### 4.3 Entity Resolution / Graph Features
 
 **Graph structure:**
 Nodes: customers, cards, devices, emails, IP addresses, merchants, phone numbers
@@ -498,6 +635,36 @@ device_fraud_rate = df.groupby('device_id')['label'].mean()
 card_device_fraud_rate = df.merge(device_fraud_rate, on='device_id')['label_device_avg']
 ```
 
+**Graph-derived features (validated by TigerGraph and academic benchmarks):**
+
+TigerGraph demonstrated that adding PageRank, component size, and betweenness centrality to tabular features improved XGBoost accuracy by **14 percentage points** on Ethereum fraud data. Research shows LINE-based embeddings outperform GNN methods (GraphSAGE, GCN) on large sparse graphs.
+
+```python
+# PageRank: devices used by many high-value cards score high
+# Compute using networkx or graph database, store as per-entity feature
+device_pagerank = nx.pagerank(device_card_graph)[device_id]
+
+# Connected component size: fraud networks separate from legitimate giant component
+component_id = union_find.find(entity_id)
+component_size = component_sizes[component_id]  # large anomalous component = fraud ring
+
+# Shortest path to known fraudster: graph distance as risk proximity
+min_distance_to_fraud = shortest_path_to_nearest_fraud_node(entity_id)
+
+# Community detection via Louvain: fraud rings form distinct clusters
+community_id = louvain_communities[entity_id]
+community_fraud_rate = fraud_count_in_community / community_size
+```
+
+**Node embeddings as features (the emerging hybrid pattern):**
+Rather than hand-engineering graph features, compute dense embeddings via FastRP, LINE, or Node2Vec and feed them as features to XGBoost. This is the architecture Stripe, JP Morgan, and Visa use — GNN/graph-generated embeddings consumed by tree-based classifiers.
+
+```python
+# FastRP embedding (via graph database or stellargraph)
+node_embedding = fastrp_model.get_embedding(entity_id)  # dense vector, e.g., 64-dim
+# Add embedding dimensions as features: emb_0, emb_1, ..., emb_63
+```
+
 **Community detection feature (simplified):**
 Count the number of "suspicious neighbors" within 2 hops — shared-device fraudsters, shared-IP fraudsters.
 
@@ -512,7 +679,7 @@ EMAIL_DOMAIN_N_DISTINCT_CARDS_30D  # high value = suspicious domain
 
 ---
 
-### 3.4 Amount Pattern Analysis
+### 4.4 Amount Pattern Analysis
 
 **Round number detection:**
 Fraudsters and card testers often use round amounts. Legitimate spending skews to specific price points (e.g., $9.99, $49.95).
@@ -549,7 +716,7 @@ amt_escalation_ratio = CARD_MAX_AMT_24H / max(CARD_AVG_AMT_30D, 1.0)
 
 ---
 
-### 3.5 Temporal Pattern Features
+### 4.5 Temporal Pattern Features
 
 **Time-of-day and day-of-week:**
 ```python
@@ -604,7 +771,7 @@ is_unusual_hour = (hour_deviation > 4).astype(int)
 
 ---
 
-### 3.6 Categorical Feature Encoding
+### 4.6 Categorical Feature Encoding
 
 High-cardinality categoricals (merchant, email domain, device type, IP subnet) require special handling.
 
@@ -641,11 +808,14 @@ Popular in banking/credit fraud; interpretable. Empirically best-performing for 
 device_count_encode = train_df.groupby('device_id').size()
 ```
 
+**CatBoost native handling (competition-validated):**
+CatBoost's ordered target encoding handles high-cardinality categoricals natively and was a key component in many competition-winning solutions. When using CatBoost, pass raw categorical columns rather than pre-encoding — the algorithm's built-in ordered encoding prevents leakage more reliably than manual approaches.
+
 ---
 
-### 3.7 Population Stability and OOT Generalization
+### 4.7 Population Stability and OOT Generalization
 
-**The core problem:** Fraud patterns shift faster than most ML problems. A model trained on January data may degrade by March as fraudsters adapt. Features that appear predictive in an IID split may not generalize to a time-shifted test set.
+**The core problem:** Fraud patterns shift faster than most ML problems. A model trained on January data may degrade by March as fraudsters adapt. Features that appear predictive in an IID split may not generalize to a time-shifted test set. The Home Credit 2024 competition formalized this with its Gini stability metric.
 
 **Out-of-time (OOT) split protocol:**
 ```
@@ -654,9 +824,10 @@ Timeline: |----Train (months 1–4)----|--Validation (month 5)--|--OOT Test (mon
 Rules:
 1. NEVER use future data to compute aggregations for past transactions
 2. For velocity features: use only transactions strictly prior to the current transaction
-3. For merchant/terminal risk features: apply the delay period (see §3.1)
+3. For merchant/terminal risk features: apply the delay period (see §4.1)
 4. Sort all data by timestamp before any train/test split
 5. Prefer time-based split over random split even for validation
+6. Use StratifiedGroupKFold by weekly temporal grouping for CV (Home Credit 2024 winning approach)
 ```
 
 **Population Stability Index (PSI):**
@@ -684,6 +855,7 @@ def psi(expected, actual, buckets=10):
 - Cyclical temporal features (hour/day encoding) — patterns repeat
 - Entity relationship features (shared device, shared IP) — structural signals
 - Log-transformed amounts — stable under inflation
+- Graph-derived features (component size, PageRank) — structural, not distribution-dependent
 
 **Features that tend to be OOT-unstable:**
 - Raw transaction amounts without normalization
@@ -696,95 +868,6 @@ def psi(expected, actual, buckets=10):
 2. Use rolling baselines that update dynamically rather than static training-set statistics
 3. For merchant/terminal risk features, apply temporal smoothing (EWMA over recent weeks)
 4. When creating target encodings, use a lookback window rather than full training history to capture recency
-
----
-
-## Part 4: Feature Engineering Checklist for LLM Agent
-
-When generating features for a new fraud dataset, work through these categories systematically:
-
-### A. Baseline Transformations (always start here)
-- [ ] Parse timestamps: extract `hour`, `dow`, `is_weekend`, `is_night`
-- [ ] Apply cyclic encoding: `sin/cos(hour)`, `sin/cos(dow)`
-- [ ] Log-transform `amount` / `txn_amt` (handle zeros with `log1p`)
-- [ ] Split amount into integer and fractional parts
-- [ ] Compute `is_round_amount`, `is_micro_amount` (<$1)
-
-### B. Customer/Card Behavioral Features (requires entity ID + sorted timestamps)
-- [ ] Transaction count: 1h, 4h, 24h, 7d, 30d
-- [ ] Sum amount: 24h, 7d, 30d
-- [ ] Avg amount: 7d, 30d, 90d
-- [ ] Std amount: 30d (for z-score normalization)
-- [ ] Days/hours since last transaction
-- [ ] `amount_zscore_30d = (amt - avg_30d) / max(std_30d, 1.0)`
-- [ ] Distinct merchant count: 7d, 30d
-- [ ] Distinct MCC count: 30d
-- [ ] `is_new_merchant`, `is_new_mcc` (first time for this customer)
-- [ ] `amount_percentile_rank_30d`
-
-### C. Terminal / Merchant Risk Features (delayed label, training only)
-- [ ] Transaction count: 7d (with 7-day delay)
-- [ ] Fraud rate: 7d, 30d (with 7-day delay)
-- [ ] Distinct customer count: 7d
-
-### D. Entity Sharing / Graph Features
-- [ ] Device → distinct card count (shared device signal)
-- [ ] IP → distinct customer count
-- [ ] Email domain → distinct card count
-- [ ] Card → distinct device count
-- [ ] `device_is_shared` (threshold >3)
-- [ ] `email_domain_is_high_risk` (target-encode domain)
-- [ ] `device_fraud_rate` (proportion of prior transactions on this device that were fraud)
-
-### E. Geo / Distance Features (if lat/lon available)
-- [ ] `dist_from_home_km` = haversine(txn_lat/lon, cardholder_lat/lon)
-- [ ] `dist_from_last_txn_km` (geo velocity)
-- [ ] `implied_speed_kmh` = `dist_from_last_txn_km / hours_since_last_txn`
-- [ ] `is_international` (different country from home)
-
-### F. Account Age and Recency
-- [ ] `account_age_days` = `txn_date - account_open_date`
-- [ ] `days_since_signup_to_first_purchase` (for e-commerce)
-- [ ] `is_new_account` (<30 days old)
-- [ ] `pct_of_account_life_with_activity`
-
-### G. Amount Patterns
-- [ ] `amount_vs_limit_ratio` (utilization, if credit limit available)
-- [ ] `amount_relative_to_7d_max`
-- [ ] `amt_escalation_ratio = max_24h / avg_30d`
-- [ ] `is_below_threshold_100`, `is_below_threshold_500`
-
-### H. Categorical Encoding
-- [ ] Frequency-encode all high-cardinality categoricals (merchant, device, email domain)
-- [ ] Target-encode (with smoothing) merchant and email domain on training set only
-- [ ] WoE encode if interpretability is required
-
----
-
-## References and Sources
-
-### Datasets
-- IEEE-CIS Fraud Detection: https://www.kaggle.com/competitions/ieee-fraud-detection
-- Sparkov Simulated Transactions: https://www.kaggle.com/datasets/kartik2112/fraud-detection
-- Fraud E-Commerce (fraudecom): https://www.kaggle.com/datasets/vbinh002/fraud-ecommerce
-- PaySim: https://www.kaggle.com/datasets/ealaxi/paysim1
-- BankSim: https://www.kaggle.com/datasets/ealaxi/banksim1
-- Credit Card Fraud (ULB/PCA): https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
-- Elliptic Bitcoin: https://www.kaggle.com/datasets/ellipticco/elliptic-data-set
-
-### Papers and Technical References
-- **Fraud Dataset Benchmark (FDB):** Grover et al. (2022), Amazon Science. https://arxiv.org/abs/2208.14417
-- **Feature Engineering Strategies for Credit Card Fraud Detection:** Bahnsen et al. (2016). Expert Systems with Applications. https://albahnsen.github.io/files/Feature%20Engineering%20Strategies%20for%20Credit%20Card%20Fraud%20Detection_published.pdf
-- **Transaction Aggregation as a Strategy for Fraud Detection:** Van Vlasselaer et al. ECML 2008. https://euro.ecom.cmu.edu/resources/elibrary/epay/s10618-008-0116-z.pdf
-- **Unsupervised Profiling Methods for Fraud Detection (Peer Group Analysis):** Bolton and Hand (2002). Statistical Science. https://www.semanticscholar.org/paper/Unsupervised-Profiling-Methods-for-Fraud-Detection-Bolton-Hand/5b640c367ae9cc4bd072006b05a3ed7c2d5f496d
-- **Towards Automated Feature Engineering for Credit Card Fraud (HMM-based):** arXiv:1909.01185. https://arxiv.org/abs/1909.01185
-- **Reproducible ML for Credit Card Fraud Detection (Practical Handbook):** Le Borgne et al. https://fraud-detection-handbook.github.io/fraud-detection-handbook/
-- **Real-time Feature Engineering for Fraud (Feldera):** https://docs.feldera.com/use_cases/fraud_detection/
-- **Dynamic Feature Engineering for Adaptive Fraud Detection (2024):** MDPI. https://www.mdpi.com/2673-4591/107/1/68
-- **Population Stability Index (PSI):** NannyML guide. https://www.nannyml.com/blog/population-stability-index-psi
-- **High-Cardinality Categorical Attributes in Fraud:** MDPI Mathematics (2022). https://www.mdpi.com/2227-7390/10/20/3808
-- **NVIDIA IEEE-CIS Top Solution Summary:** https://developer.nvidia.com/blog/leveraging-machine-learning-to-detect-fraud-tips-to-developing-a-winning-kaggle-solution/
-- **PaySim Paper:** Lopez-Rojas et al. (2016). EMSS. https://www.msc-les.org/proceedings/emss/2016/EMSS2016_249.pdf
 
 ---
 
@@ -898,6 +981,30 @@ device_risk_score = (
     0.2 * headless_browser +
     0.2 * (client_server_time_diff_abs > 300)  # >5 min clock skew
 )
+```
+
+**Device fingerprinting features (production-validated by Stripe):**
+Stripe collects behavioral signals and reports that 92% of cards on its network have been seen before, enabling rich cross-merchant device intelligence. Key engineered features:
+
+```python
+# Core device fingerprinting features
+is_new_device = device_id not in KNOWN_DEVICES_FOR_CARD
+num_accounts_per_device = device_distinct_accounts_30d
+device_location_mismatch = (device_geo_country != billing_country)
+emulator_detected = (battery_emulator_score > 0.5) | headless_browser
+
+# Canvas/WebGL fingerprint hash — detects virtual machines and spoofing
+canvas_fingerprint_hash = hash(canvas_data)
+canvas_is_known_emulator = canvas_fingerprint_hash in KNOWN_EMULATOR_HASHES
+
+# JA3 TLS fingerprint — identifies client software independent of IP
+ja3_hash = compute_ja3(tls_handshake)
+ja3_is_suspicious = ja3_hash in KNOWN_BOT_JA3_HASHES
+
+# Behavioral biometrics (when available)
+mouse_movement_entropy = entropy(mouse_path_deltas)  # bots have low entropy
+typing_cadence_variance = var(keystroke_intervals)    # bots have low variance
+copy_paste_ratio = paste_events / total_field_fills   # >0.5 = suspicious
 ```
 
 **Client-server time differential (clock skew):**
@@ -1142,6 +1249,7 @@ At 0.05% fraud, a model that flags everything as legitimate achieves 99.95% accu
 Primary metric:   AUPRC (Precision-Recall AUC)
 Operating metric: Recall @ target_FPR (e.g., "fraud capture rate at 1% false positive rate")
 Secondary:        Lift curve, calibration curve (Brier score), expected financial cost
+Stability:        Gini stability metric (Home Credit 2024 approach — penalizes temporal degradation)
 ```
 
 **Bootstrapped confidence intervals are mandatory on small OOT sets:**
@@ -1174,9 +1282,11 @@ def bootstrap_auprc(y_true, y_score, n_boot=1000):
 | **Threshold-only** (no resampling) | Cleanest theoretically; may underfit minority class with very weak features | Strong features + enough positives (>5K in train) |
 | **Class weights** (scale_pos_weight) | Correct: modifies loss function. Set ratio 10–50:1, not 1/fraud_rate (too aggressive) | Default starting point |
 | **Random undersampling** | Loses majority class information. Target 5:1–20:1 ratio, not 1:1. Never resample eval data | When training set is large enough to afford it |
-| **SMOTE** | Interpolates between rare fraud cases — may create nonsensical samples in high-dimensional feature space. Use SMOTE-ENN or SMOTE-Tomek, target 10:1–5:1 not 1:1 | Use cautiously; verify on OOT |
+| **SMOTE** | **Use with caution.** Interpolates between rare fraud cases — may create nonsensical samples in high-dimensional feature space. Production practitioners increasingly view SMOTE as problematic for heterogeneous fraud data. If used, apply SMOTE-ENN or SMOTE-Tomek, target 10:1–5:1 not 1:1 | Verify carefully on OOT; prefer class weights instead |
 | **Focal loss** | Theoretically cleanest: down-weights easy negatives, focuses gradient on hard boundary cases | Best when class weight alone underperforms |
 | **Anomaly hybrid** | Train isolation forest on all data → add anomaly score as feature → supervised classifier | When labeled fraud is <500 cases |
+
+**Note on SMOTE skepticism (2025 consensus):** Research (arXiv:2412.07437) and competition practitioners increasingly recommend against SMOTE for fraud data. The core issue is that fraud transactions are heterogeneous — they don't form compact clusters that interpolation can meaningfully expand. Production systems at Stripe, Visa, and Mastercard address class imbalance through massive data volume and cost-sensitive learning (class weights), not synthetic oversampling.
 
 **Focal loss with XGBoost:**
 ```python
@@ -1211,7 +1321,7 @@ model = xgb.train(
 
 ### 6.3 Recommended Ensemble Strategy
 
-Train 3 models with diverse imbalance treatments, rank-average their scores:
+Train 3+ models with diverse imbalance treatments, rank-average their scores. This is the dominant pattern across all major Kaggle fraud competitions — every winning solution uses ensembling.
 
 ```python
 # Model 1: Focal loss + moderate class weight
@@ -1234,6 +1344,9 @@ X_train_aug['anomaly_score'] = -iso.score_samples(X_train)  # higher = more anom
 model_3 = xgb.XGBClassifier(scale_pos_weight=20, ...)
 model_3.fit(X_train_aug, y_train, ...)
 
+# Model 4 (optional): LightGBM with different feature subset (diversity)
+model_4 = lgb.LGBMClassifier(is_unbalance=True, ...)
+
 # Rank-average ensemble (more robust than probability averaging at extreme imbalance)
 from scipy.stats import rankdata
 def rank_avg(*score_arrays):
@@ -1245,10 +1358,14 @@ y_oot_pred = rank_avg(
     model_1.predict_proba(X_oot)[:, 1],
     model_2.predict_proba(X_oot)[:, 1],
     model_3.predict_proba(X_oot_aug)[:, 1],
+    model_4.predict_proba(X_oot)[:, 1],
 )
 ```
 
 **Why rank-average over probability average:** At extreme imbalance, raw probability estimates are poorly calibrated across models. Rank-averaging preserves the ordinal signal while neutralizing calibration differences.
+
+**Competition-validated stacking (Chris Deotte pattern):**
+For maximum performance, use multi-level stacking: Level 1 = diverse base models (XGBoost, LightGBM, CatBoost, NN); Level 2 = meta-learner trained on Level 1 out-of-fold predictions. Chris Deotte's April 2025 Kaggle Playground win used a 3-level stack of 72 models. In production, 3–5 model ensembles are more practical.
 
 ---
 
@@ -1275,15 +1392,28 @@ xgb.XGBClassifier(
 
 **Feature selection note:** At 100–400 features, recursive feature elimination or importance-based pruning should happen *inside* the cross-validation loop — not as a pre-processing step on the full dataset. Feature selection on the same data you train on inflates importance of noise features.
 
-
+**LightGBM alternative settings (equally competitive per TALENT):**
+```python
+lgb.LGBMClassifier(
+    n_estimators=1000,
+    learning_rate=0.05,
+    max_depth=-1,               # unlimited depth; controlled by num_leaves
+    num_leaves=63,              # 2^6 - 1; LightGBM grows leaf-wise
+    min_child_samples=20,
+    subsample=0.8,
+    colsample_bytree=0.7,
+    is_unbalance=True,          # LightGBM's built-in class weight handling
+    metric='average_precision',
+    early_stopping_rounds=50,
+    verbose=-1,
+)
+```
 
 ---
 
 ## Part 7: Advanced Sequence Modeling & Lifecycle Detection
 
 Advanced techniques that move beyond per-transaction features to capture the **shape and trajectory** of user behavior over time. These are Tier 2–4 signals — most powerful when stacked on top of Tier 1 (RFM/behavioral) features in an XGBoost ensemble.
-
-**Note:** Graph-based GNN approaches are excluded here. They require significant infrastructure (heterogeneous graph construction, GNN training, graph serving) and are better suited as a separate offline batch process. The techniques below are designed to integrate cleanly with the fit/transform API.
 
 ---
 
@@ -1362,7 +1492,7 @@ if card_col and amt_col and time_col:
 
 Hidden Markov Models are the most naturally suited framework for fraud lifecycle detection. The hidden states correspond to fraud lifecycle stages; the observable emissions are transaction features. This is Tier 2 in the architecture: sequence-level signal that point-in-time features miss.
 
-Research has shown that HMM-based features — specifically the likelihood of a transaction sequence given the learned model — significantly improve fraud detection by quantifying how "normal" or "fraudulent" the sequence looks as a whole.
+Research has shown that HMM-based features — specifically the likelihood of a transaction sequence given the learned model — significantly improve fraud detection by quantifying how "normal" or "fraudulent" the sequence looks as a whole. Lucas et al. (2019) extended this with "multiple perspectives HMMs" generating 8 features from both cardholder and merchant viewpoints.
 
 #### Hidden state design per fraud type
 
@@ -1416,7 +1546,53 @@ See **Recipe 8** in `recipes.md` for full fit/transform implementation.
 
 ---
 
-### 7.3 Feature-Group Autoencoder Anomaly Detection
+### 7.3 Transformer and Attention-Based Sequence Models
+
+**Capital One's "From Features to Sequences" transition (KDD 2025)** signals where the industry is heading: treating the raw transaction sequence as input to a transformer, rather than pre-computing features from it. This approach has several advantages: it discovers interaction patterns that manual feature engineering misses, handles variable-length histories naturally, and can be pretrained on massive unlabeled transaction corpora.
+
+**Practical transformer approaches for fraud:**
+
+**FraudGT** (IBM Research, ICAIF 2024): A graph transformer that uses multi-dimensional edge attributes for financial fraud detection.
+
+**Graph-Temporal Contrastive Transformer** (December 2025): Combines graph and temporal encoders with contrastive learning, achieving AUC 0.982.
+
+**Mastercard's Decision Intelligence Pro**: Uses a proprietary RNN that treats merchant visit history as a "prompt" — analogous to how LLMs process text — to assess whether a transaction fits cardholder behavior.
+
+**AmEx competition approach (Chris Deotte, 15th place)**: Transformer with LightGBM knowledge distillation. Train a transformer on raw time-series billing data, then distill its learned representations into features consumed by LightGBM.
+
+**Implementation guidance for the agent:**
+```python
+# Transaction sequence transformer (simplified)
+# Each transaction = token with features: [amount, hour, day, merchant_emb, device_emb, ...]
+# Positional encoding = time delta from first transaction (continuous, not discrete)
+
+# For the fit/transform API:
+# 1. fit(): Train a small transformer on training sequences, extract embeddings
+# 2. transform(): Forward-pass each card's sequence, extract the final hidden state
+# 3. Add hidden state dimensions as features to the XGBoost input
+
+# This is the "foundation model embeddings as features" pattern from Part 1.2
+```
+
+**When to use transformers over HMMs:** When you have >100K labeled sequences and GPU access. HMMs are more sample-efficient and interpretable; transformers are more expressive but require more data and compute.
+
+---
+
+### 7.4 State-Space Models (Mamba/S4) — Emerging Frontier
+
+State-space models represent the newest class of sequence models being applied to tabular and financial data.
+
+**MambaTab** (January 2024): First application of Mamba SSM blocks to tabular data. Matches TransTab with less than 1% of the parameters.
+
+**Mambular** (August 2024): Treats each feature as a token in a sequence processed through Mamba layers. Best average rank across UCI benchmarks versus FT-Transformer, TabTransformer, XGBoost, and MLP.
+
+**Why SSMs are theoretically attractive for fraud:** Linear-time processing (vs. quadratic for transformers) enables efficient scoring of very long transaction histories. Selective state spaces can model both gradual behavioral drift (bust-out ramp-up) and sudden regime changes (ATO exploitation burst).
+
+**Current status:** Direct fraud applications have not yet been published. The agent should monitor this space but default to HMMs or transformers for sequence features in the near term.
+
+---
+
+### 7.5 Feature-Group Autoencoder Anomaly Detection
 
 Train autoencoders on **specific feature groups** — not all features at once. Anomaly signal for "this device profile is unusual" and "this amount/time pattern is unusual" are different signals. Blending them into one autoencoder muddies the signal.
 
@@ -1452,7 +1628,7 @@ See **Recipe 9** in `recipes.md` for full per-feature-group implementation.
 
 ---
 
-### 7.4 Dynamic Time Warping (DTW) Trajectory Analysis
+### 7.6 Dynamic Time Warping (DTW) Trajectory Analysis
 
 DTW compares behavioral trajectories where the **shape** matters but the **timing** varies. In retail: "active → dormant → explosive" maps directly to bust-out fraud pattern matching.
 
@@ -1482,7 +1658,7 @@ For a full DTW-based implementation using `dtaidistance` (if available), compute
 
 ---
 
-### 7.5 CUSUM Behavioral Shift Detection
+### 7.7 CUSUM Behavioral Shift Detection
 
 CUSUM (Cumulative Sum) is a sequential change detection algorithm that flags when a process has shifted to a new regime. It's ideal for detecting behavioral shifts that accumulate gradually over multiple transactions.
 
@@ -1509,7 +1685,7 @@ See **Recipe 10** in `recipes.md` for the fit/transform implementation.
 
 ---
 
-### 7.6 PU Learning and Adversarial Adaptation
+### 7.8 PU Learning and Adversarial Adaptation
 
 #### The label problem: Positive and Unlabeled (PU) learning
 
@@ -1535,12 +1711,13 @@ Fraudsters probe the decision boundary and adapt. Your model's behavioral cluste
 3. High-importance features that drift = evasion target. Low-importance features that drift = natural demographic shift.
 4. Any sequence model (HMM, autoencoder) needs a retraining cadence. For commodity fraud (CNP): weeks. For sophisticated synthetic identity rings: months (they can afford patience during the bust-out lifecycle).
 5. **Feature importance stability is a deployment signal**: if top features change dramatically between train and OOT without PSI spike, the model is learning unstable patterns.
+6. **Federated learning** (JP Morgan's Project AIKYA, Feedzai's RiskFM) enables cross-institutional intelligence without sharing raw data — making it harder for fraudsters to exploit blind spots at individual institutions.
 
 ---
 
-### 7.7 Four-Tier Architecture Synthesis
+### 7.9 Five-Tier Architecture Synthesis (Updated 2026)
 
-The full production architecture stacks tiers, with XGBoost consuming features from all of them.
+The full production architecture stacks tiers, with XGBoost consuming features from all of them. The 2026 update adds a foundation model embedding tier.
 
 **Tier 1 — Fast features (per-transaction, real-time):**
 - RFM-based: behavioral z-scores, amount corridors, velocity counts
@@ -1552,6 +1729,7 @@ The full production architecture stacks tiers, with XGBoost consuming features f
 - HMM state posteriors: `P(active_exploitation | sequence)`, `P(bust_out | sequence)`
 - CUSUM behavioral shift scores
 - RFM cluster distances (fraud-negative centroid distances)
+- Transformer hidden states (if compute budget allows)
 - Run Viterbi decoding on each user's recent history. Catches trajectory patterns that point-in-time features miss.
 
 **Tier 3 — Anomaly detection (batch, nightly):**
@@ -1560,19 +1738,27 @@ The full production architecture stacks tiers, with XGBoost consuming features f
 - K-means cluster outlier scores (distance to nearest centroid)
 - This is the "unknown unknowns" detector — finds behavioral patterns that don't match any known archetype.
 
-**Tier 4 — Entity clustering (batch, nightly — graph-free):**
+**Tier 4 — Entity clustering (batch, nightly):**
 - Union-Find entity resolution counts (shared device/email/address clusters from Part 5.3)
 - `device_distinct_users_30d`, `dest_is_mule_candidate`, `cross_entity_velocity`
-- Catches coordinated fraud and synthetic identity rings without requiring a GNN.
-- (Full GNN-based Tier 4 is a separate infrastructure project — not included here.)
+- Graph-derived features: PageRank, connected component size, community fraud rate
+- Node embeddings via FastRP/LINE as dense feature vectors
+- Catches coordinated fraud and synthetic identity rings.
+- (Full GNN-based Tier 4: GraphSAGE, GCN, or FraudGT if graph infrastructure is available.)
 
-**XGBoost on top:** Consumes features from Tiers 1–4. Learns optimal combination — an anomalous Tier 3 score alone may be a false positive, but combined with a Tier 2 exploitation state and a Tier 4 shared-device cluster flag is almost certainly fraud.
+**Tier 5 — Foundation model embeddings (batch or real-time, new in 2025–2026):**
+- Transaction sequence embeddings from pretrained models (Featurespace NPPR, Stripe PFM-style)
+- TabPFN distilled representations for small-data scenarios
+- Cross-table transfer embeddings (CARTE, XTab) when multiple data sources available
+- This tier replaces some manual feature engineering with learned representations.
 
-**Agent implication:** Start with Tier 1 (already in baseline). Add Tier 2 features (HMM, CUSUM) in subsequent iterations. Add Tier 3 (autoencoders) once Tier 1 has plateaued. Tier 4 entity resolution is already partially in Recipe 5 — extend with `cross_entity_velocity` patterns from Part 5.4.
+**XGBoost on top:** Consumes features from Tiers 1–5. Learns optimal combination — an anomalous Tier 3 score alone may be a false positive, but combined with a Tier 2 exploitation state and a Tier 4 shared-device cluster flag is almost certainly fraud.
+
+**Agent implication:** Start with Tier 1 (already in baseline). Add Tier 2 features (HMM, CUSUM) in subsequent iterations. Add Tier 3 (autoencoders) once Tier 1 has plateaued. Tier 4 entity resolution is already partially in Recipe 5 — extend with graph features. Tier 5 foundation model embeddings should be explored when dataset size is small or when pretrained models for the domain are available.
 
 ---
 
-### 7.8 Input Data Architecture: Multi-Source Joins
+### 7.10 Input Data Architecture: Multi-Source Joins
 
 The feature engineering framework is designed for raw transaction data joined to multiple vendor signals before features are engineered. The typical join pattern:
 
@@ -1583,6 +1769,8 @@ transactions (base)
   LEFT JOIN email_reputation ON email_domain                -- disposable, risky TLD, domain age
   LEFT JOIN vendor_enrichment ON merchant_id                -- MCC category, merchant risk tier
   LEFT JOIN historical_aggregates ON (card_id, window_key) -- pre-computed velocity counts
+  LEFT JOIN graph_embeddings ON entity_id                   -- GNN/FastRP node embeddings
+  LEFT JOIN foundation_model_scores ON transaction_id       -- pretrained model embeddings
 ```
 
 In the fit/transform API:
@@ -1597,3 +1785,143 @@ The 9×4 matrix from Part 5.4 applies to the joined data:
 
 The agent should add vendor/device/IP join-dependent features progressively, starting from whichever join columns are present in the dataset (check `config.dataset_profile` for `has_geo`, `has_identity`, `has_device`).
 
+---
+
+## Part 8: Feature Engineering Checklist for LLM Agent
+
+When generating features for a new fraud dataset, work through these categories systematically:
+
+### A. Baseline Transformations (always start here)
+- [ ] Parse timestamps: extract `hour`, `dow`, `is_weekend`, `is_night`
+- [ ] Apply cyclic encoding: `sin/cos(hour)`, `sin/cos(dow)`
+- [ ] Log-transform `amount` / `txn_amt` (handle zeros with `log1p`)
+- [ ] Split amount into integer and fractional parts
+- [ ] Compute `is_round_amount`, `is_micro_amount` (<$1)
+
+### B. Customer/Card Behavioral Features (requires entity ID + sorted timestamps)
+- [ ] Transaction count: 1min, 5min, 1h, 4h, 24h, 7d, 30d
+- [ ] Sum amount: 24h, 7d, 30d
+- [ ] Avg amount: 7d, 30d, 90d
+- [ ] Std amount: 30d (for z-score normalization)
+- [ ] Days/hours since last transaction
+- [ ] `amount_zscore_30d = (amt - avg_30d) / max(std_30d, 1.0)`
+- [ ] Velocity ratio: `count_1d / max(count_30d / 30, 0.1)`
+- [ ] Velocity z-score: `(count_1d - avg_daily_30d) / max(std_daily_30d, 1.0)`
+- [ ] Distinct merchant count: 7d, 30d
+- [ ] Distinct MCC count: 30d
+- [ ] `is_new_merchant`, `is_new_mcc` (first time for this customer)
+- [ ] `amount_percentile_rank_30d`
+
+### C. Terminal / Merchant Risk Features (delayed label, training only)
+- [ ] Transaction count: 7d (with 7-day delay)
+- [ ] Fraud rate: 7d, 30d (with 7-day delay)
+- [ ] Distinct customer count: 7d
+
+### D. Entity Sharing / Graph Features
+- [ ] Device → distinct card count (shared device signal)
+- [ ] IP → distinct customer count
+- [ ] Email domain → distinct card count
+- [ ] Card → distinct device count
+- [ ] `device_is_shared` (threshold >3)
+- [ ] `email_domain_is_high_risk` (target-encode domain)
+- [ ] `device_fraud_rate` (proportion of prior transactions on this device that were fraud)
+- [ ] Connected component size (Union-Find over shared entities)
+- [ ] PageRank score (if graph infrastructure available)
+- [ ] Node embedding dimensions (FastRP/LINE, if graph infrastructure available)
+
+### E. Geo / Distance Features (if lat/lon available)
+- [ ] `dist_from_home_km` = haversine(txn_lat/lon, cardholder_lat/lon)
+- [ ] `dist_from_last_txn_km` (geo velocity)
+- [ ] `implied_speed_kmh` = `dist_from_last_txn_km / hours_since_last_txn`
+- [ ] `is_international` (different country from home)
+
+### F. Account Age and Recency
+- [ ] `account_age_days` = `txn_date - account_open_date`
+- [ ] `days_since_signup_to_first_purchase` (for e-commerce)
+- [ ] `is_new_account` (<30 days old)
+- [ ] `pct_of_account_life_with_activity`
+
+### G. Amount Patterns
+- [ ] `amount_vs_limit_ratio` (utilization, if credit limit available)
+- [ ] `amount_relative_to_7d_max`
+- [ ] `amt_escalation_ratio = max_24h / avg_30d`
+- [ ] `is_below_threshold_100`, `is_below_threshold_500`
+
+### H. Categorical Encoding
+- [ ] Frequency-encode all high-cardinality categoricals (merchant, device, email domain)
+- [ ] Target-encode (with smoothing) merchant and email domain on training set only
+- [ ] WoE encode if interpretability is required
+- [ ] Use CatBoost native handling when CatBoost is in the ensemble
+
+### I. Foundation Model / Embedding Features (when available)
+- [ ] TabPFN distilled predictions (for small datasets, <50K rows)
+- [ ] Transaction sequence embeddings (if pretrained model available)
+- [ ] Graph node embeddings (FastRP, LINE, or GNN-derived)
+- [ ] Cross-table transfer embeddings (CARTE-style, if multiple data sources)
+
+---
+
+## References and Sources
+
+### Datasets
+- IEEE-CIS Fraud Detection: https://www.kaggle.com/competitions/ieee-fraud-detection
+- Sparkov Simulated Transactions: https://www.kaggle.com/datasets/kartik2112/fraud-detection
+- Fraud E-Commerce (fraudecom): https://www.kaggle.com/datasets/vbinh002/fraud-ecommerce
+- PaySim: https://www.kaggle.com/datasets/ealaxi/paysim1
+- BankSim: https://www.kaggle.com/datasets/ealaxi/banksim1
+- Credit Card Fraud (ULB/PCA): https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+- Elliptic Bitcoin: https://www.kaggle.com/datasets/ellipticco/elliptic-data-set
+
+### Key Papers — Tabular ML and Benchmarks
+- **Why do tree-based models still outperform deep learning on tabular data?** Grinsztajn et al. (NeurIPS 2022). https://arxiv.org/abs/2207.08815
+- **When Do Neural Nets Outperform Boosted Trees on Tabular Data?** McElfresh et al. (NeurIPS 2023). https://arxiv.org/abs/2305.02997
+- **TALENT: A Closer Look at Deep Learning Methods on Tabular Datasets.** Ye et al. (2024, revised Nov 2025). https://arxiv.org/abs/2407.00956
+- **TabArena: A Living Benchmark for Machine Learning on Tabular Data.** (NeurIPS 2025). https://arxiv.org/abs/2506.16791
+- **TabM: Advancing Tabular Deep Learning with Parameter-Efficient Ensembling.** Gorishniy et al. (ICLR 2025). https://arxiv.org/abs/2410.24210
+- **Tabular data: Deep learning is not all you need.** Shwartz-Ziv and Armon (2021). https://arxiv.org/abs/2106.03253
+
+### Key Papers — Foundation Models for Tabular Data
+- **Accurate predictions on small data with a tabular foundation model.** Hollmann et al. (Nature 2025). https://www.nature.com/articles/s41586-024-08328-6
+- **TabPFN-2.5: Advancing the State of the Art in Tabular Foundation Models.** (Nov 2025). https://arxiv.org/abs/2511.08667
+- **CARTE: Pretraining and Transfer for Tabular Learning.** Kim et al. (2024). https://arxiv.org/abs/2402.16785
+- **XTab: Cross-table Pretraining for Tabular Transformers.** (ICML 2023). https://arxiv.org/abs/2305.06090
+- **Towards a Foundation Purchasing Model: Pretrained Generative Autoregression on Transaction Sequences.** (2024). https://arxiv.org/abs/2401.01641
+
+### Key Papers — Fraud Detection Methods
+- **Feature Engineering Strategies for Credit Card Fraud Detection:** Bahnsen et al. (2016). Expert Systems with Applications. https://albahnsen.github.io/files/Feature%20Engineering%20Strategies%20for%20Credit%20Card%20Fraud%20Detection_published.pdf
+- **Multiple perspectives HMM-based feature engineering for credit card fraud detection.** Lucas et al. (2019). https://arxiv.org/abs/1905.06247
+- **FraudGT: A Simple, Effective, and Efficient Graph Transformer for Financial Fraud Detection.** IBM Research (ICAIF 2024). https://jshun.csail.mit.edu/FraudGT.pdf
+- **Graph-Temporal Contrastive Transformer for Financial Fraud Detection.** (Dec 2025). https://www.mdpi.com/1999-4893/18/12/770
+- **An Introduction to Machine Learning Methods for Fraud Detection.** MDPI (2025). https://www.mdpi.com/2076-3417/15/21/11787
+- **MambaTab: A Simple Yet Effective Approach for Handling Tabular Data.** (2024). https://arxiv.org/abs/2401.08867
+- **Mambular: A Sequential Model for Tabular Deep Learning.** (2024). https://arxiv.org/abs/2408.06291
+
+### Competition Writeups and Practitioner Resources
+- **NVIDIA IEEE-CIS Top Solution Summary:** https://developer.nvidia.com/blog/leveraging-machine-learning-to-detect-fraud-tips-to-developing-a-winning-kaggle-solution/
+- **The Kaggle Grandmasters Playbook: 7 Battle-Tested Modeling Techniques:** https://developer.nvidia.com/blog/the-kaggle-grandmasters-playbook-7-battle-tested-modeling-techniques-for-tabular-data/
+- **AmEx Default Prediction 1st Place Solution:** https://deepwiki.com/jxzly/Kaggle-American-Express-Default-Prediction-1st-solution
+- **State of ML Competitions 2024:** https://mlcontests.com/state-of-machine-learning-competitions-2024/
+- **State of ML Competitions 2025:** https://mlcontests.com/state-of-machine-learning-competitions-2025/
+- **Feature Engineering for Fraud Detection (AI Infrastructure Alliance):** https://ai-infrastructure.org/feature-engineering-for-fraud-detection/
+- **From XGBoost to Foundation Models (ML Frontiers):** https://mlfrontiers.substack.com/p/from-xgboost-to-foundation-models
+
+### Industry References
+- **Stripe Payments Foundation Model:** https://stripe.com/newsroom/news/sessions-2025
+- **Stripe Radar:** https://stripe.com/radar
+- **Visa VAAI:** https://investor.visa.com/news/news-details/2024/Visa-Announces-Generative-AI-Powered-Fraud-Solution-to-Combat-Account-Attacks/
+- **Mastercard Decision Intelligence:** https://www.mastercard.com/us/en/news-and-trends/press/2024/may/mastercard-accelerates-card-fraud-detection-with-generative-ai-technology.html
+- **JP Morgan Project AIKYA:** https://www.jpmorgan.com/kinexys/content-hub/project-aikya
+- **Feedzai RiskFM:** https://www.zenml.io/llmops-database/ai-powered-fraud-detection-using-mixture-of-experts-and-federated-learning
+- **TabPFN GitHub:** https://github.com/PriorLabs/TabPFN
+
+### Other Technical References
+- **Fraud Dataset Benchmark (FDB):** Grover et al. (2022), Amazon Science. https://arxiv.org/abs/2208.14417
+- **Transaction Aggregation as a Strategy for Fraud Detection:** Van Vlasselaer et al. ECML 2008. https://euro.ecom.cmu.edu/resources/elibrary/epay/s10618-008-0116-z.pdf
+- **Unsupervised Profiling Methods for Fraud Detection (Peer Group Analysis):** Bolton and Hand (2002). Statistical Science.
+- **Towards Automated Feature Engineering for Credit Card Fraud (HMM-based):** arXiv:1909.01185. https://arxiv.org/abs/1909.01185
+- **Reproducible ML for Credit Card Fraud Detection (Practical Handbook):** Le Borgne et al. https://fraud-detection-handbook.github.io/fraud-detection-handbook/
+- **Real-time Feature Engineering for Fraud (Feldera):** https://docs.feldera.com/use_cases/fraud_detection/
+- **Dynamic Feature Engineering for Adaptive Fraud Detection (2024):** MDPI. https://www.mdpi.com/2673-4591/107/1/68
+- **Population Stability Index (PSI):** NannyML guide. https://www.nannyml.com/blog/population-stability-index-psi
+- **High-Cardinality Categorical Attributes in Fraud:** MDPI Mathematics (2022). https://www.mdpi.com/2227-7390/10/20/3808
+- **PaySim Paper:** Lopez-Rojas et al. (2016). EMSS. https://www.msc-les.org/proceedings/emss/2016/EMSS2016_249.pdf

@@ -94,12 +94,13 @@ def save_experiment(
 
     exp_id = f"exp_{exp_num:03d}"
 
-    # Copy code snapshots
-    if features_py_path is None:
-        features_py_path = ROOT_DIR / "features.py"
-    if model_py_path is None:
-        model_py_path = ROOT_DIR / "model.py"
-
+    # Copy code snapshots — paths are required (no default; the source file
+    # locations are config-driven now: datasets/<name>/{features,model}.py)
+    if features_py_path is None or model_py_path is None:
+        raise ValueError(
+            "save_experiment requires features_py_path and model_py_path "
+            "(driven from config.features_file / config.model_file)"
+        )
     shutil.copy2(features_py_path, exp_dir / "features.py")
     shutil.copy2(model_py_path, exp_dir / "model.py")
 

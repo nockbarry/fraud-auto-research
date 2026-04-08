@@ -26,6 +26,30 @@ class EvaluationTimeout(Exception):
     """Raised when run_evaluation() exceeds the configured timeout."""
 
 
+def _load_module_from_path(path, kind: str):
+    """Load a Python file at an arbitrary path as a fresh module.
+
+    Used so configs can point at datasets/<name>/{features,model}.py without
+    those files needing to be importable as packages. Forces a reload each
+    call so the agent's edits between experiments are picked up.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{kind} file not found: {path}")
+    spec_name = f"_loaded_{kind}_{path.stem}"
+    sys.modules.pop(spec_name, None)
+    spec = importlib.util.spec_from_file_location(spec_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load spec for {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def precision_at_recall(y_true: np.ndarray, y_score: np.ndarray, target_recall: float) -> tuple[float, float]:
     """Find precision at a fixed recall level.
 
@@ -282,14 +306,11 @@ def _run_evaluation_impl(config: dict) -> dict:
     # Step 3: Fit on train only (with labels)
     print("Step 3: Fitting feature state on train...")
     sys.path.insert(0, str(ROOT_DIR))
-    import importlib
 
-    features_file = config.get("features_file", "features.py")
-    features_module_name = features_file.replace(".py", "")
-    if features_module_name in sys.modules:
-        del sys.modules[features_module_name]
-    features_mod = importlib.import_module(features_module_name)
-    importlib.reload(features_mod)
+    features_file = config.get("features_file")
+    if not features_file:
+        raise ValueError("config must specify features_file (e.g. datasets/ieee_cis/features.py)")
+    features_mod = _load_module_from_path(ROOT_DIR / features_file, "features")
 
     fit_state = features_mod.fit(df_train.copy(), pd.Series(y_train), config)
 
@@ -339,12 +360,10 @@ def _run_evaluation_impl(config: dict) -> dict:
     X_val = _prepare_features(df_val)
     X_oot = _prepare_features(df_oot)
 
-    model_file = config.get("model_file", "model.py")
-    model_module_name = model_file.replace(".py", "")
-    if model_module_name in sys.modules:
-        del sys.modules[model_module_name]
-    model_mod = importlib.import_module(model_module_name)
-    importlib.reload(model_mod)
+    model_file = config.get("model_file")
+    if not model_file:
+        raise ValueError("config must specify model_file (e.g. datasets/ieee_cis/model.py)")
+    model_mod = _load_module_from_path(ROOT_DIR / model_file, "model")
     train_and_evaluate = model_mod.train_and_evaluate
 
     model_result = train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config)
@@ -568,8 +587,8 @@ def save_experiment(config: dict, results: dict, hypothesis: str, status: str, s
     from harness.experiment_tracker import save_experiment as _save
 
     dataset = config.get("dataset_name", "unknown")
-    features_file = ROOT_DIR / config.get("features_file", "features.py")
-    model_file = ROOT_DIR / config.get("model_file", "model.py")
+    features_file = ROOT_DIR / config["features_file"]
+    model_file = ROOT_DIR / config["model_file"]
     return _save(
         dataset=dataset,
         hypothesis=hypothesis,

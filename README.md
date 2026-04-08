@@ -94,27 +94,38 @@ fraud-auto-research/
 ├── recipes.md              # Feature engineering patterns (19 recipes, including ambitious
 │                           #   compound moves: UID construction, velocity stacks, rolling
 │                           #   terminal fraud rates, behavioral fingerprints)
-├── fraud_practices.md      # SOTA fraud knowledge bank — datasets, fraud types, feature recipes
+├── fraud_practices.md      # SOTA fraud knowledge bank (~107 KB) — DO NOT read whole; use index
+├── fraud_practices_index.md  # Section TOC + line ranges + when_to_use for the above
 │
 ├── configs/
 │   ├── ieee-cis.yaml       # Track A: continuing run
 │   ├── ieee-cis-fresh.yaml # Track B: fresh parallel run on same data
 │   ├── fraud-sim.yaml
-│   └── fdh.yaml
+│   ├── fdh.yaml
+│   └── paysim.yaml
 │
-├── features_ieee.py        # AGENT-EDITABLE — IEEE-CIS Track A feature transforms
-├── features_ieee_fresh.py  # AGENT-EDITABLE — IEEE-CIS Track B feature transforms
-├── features_sim.py         # AGENT-EDITABLE — fraud-sim feature transforms
-├── features_fdh.py         # AGENT-EDITABLE — FDH feature transforms
-├── model_ieee.py           # AGENT-EDITABLE — IEEE-CIS Track A model definition
-├── model_ieee_fresh.py     # AGENT-EDITABLE — IEEE-CIS Track B model definition
-├── model_sim.py            # AGENT-EDITABLE — fraud-sim model
-├── model_fdh.py            # AGENT-EDITABLE — FDH model
+├── datasets/               # AGENT-EDITABLE — one directory per dataset
+│   ├── ieee_cis/
+│   │   ├── features.py     # IEEE-CIS Track A feature transforms
+│   │   └── model.py
+│   ├── ieee_cis_fresh/     # IEEE-CIS Track B
+│   │   ├── features.py
+│   │   └── model.py
+│   ├── fraud_sim/
+│   ├── fdh/
+│   └── paysim/
 │
-├── journal_ieee-cis.md     # Agent's own notes for Track A (thesis, campaign, lessons)
-├── journal_ieee-cis-fresh.md  # Agent's own notes for Track B
-├── journal_fraud-sim.md    # Agent's notes for fraud-sim
-├── journal_fdh.md          # Agent's notes for FDH
+├── journals/               # Agent's own notes — one per dataset
+│   ├── ieee-cis.md
+│   ├── ieee-cis-fresh.md
+│   ├── fraud-sim.md
+│   ├── fdh.md
+│   └── paysim.md
+│
+├── scripts/                # One-shot data prep and BigQuery template
+│   ├── prepare_data.py
+│   ├── prepare_sim_data.py
+│   └── features.sql        # Dormant — only used by BigQuery loader path
 │
 ├── harness/                # READ-ONLY — the fixed measurement apparatus
 │   ├── evaluate.py         # Pipeline: load → fit → transform → validate → train → metrics
@@ -206,7 +217,7 @@ python3 -m harness.column_analysis ieee-cis --show     # print cached analysis
 python3 -m harness.column_analysis ieee-cis --refresh  # force recompute
 ```
 
-### Per-dataset agent journals (`journal_{dataset}.md`)
+### Per-dataset agent journals (`journals/{dataset}.md`)
 
 Each dataset has a markdown journal the agent maintains across experiments:
 
@@ -231,9 +242,9 @@ experiments/ieee-cis/
   index.jsonl              ← append-only timeline
 ```
 
-If an experiment crashes and corrupts the working `features_{dataset}.py`, restore from the SOTA snapshot:
+If an experiment crashes and corrupts the working `datasets/<name>/features.py`, restore from the SOTA snapshot:
 ```bash
-cp experiments/ieee-cis/sota/features.py features_ieee.py
+cp experiments/ieee-cis/sota/features.py datasets/ieee_cis/features.py
 ```
 
 ### Structured agent context
@@ -300,8 +311,8 @@ Each parquet file needs a `label` column (0/1) and all feature columns. The harn
 
 ```yaml
 dataset_name: "my-dataset"
-features_file: "features_mydataset.py"
-model_file: "model_mydataset.py"
+features_file: "datasets/my_dataset/features.py"
+model_file: "datasets/my_dataset/model.py"
 
 local_data:
   enabled: true
@@ -333,7 +344,9 @@ dataset_profile:
 
 ### 3. Write baseline files
 
-**`features_mydataset.py`** — use selective NaN drop (not blanket >50%):
+`mkdir -p datasets/my_dataset/`
+
+**`datasets/my_dataset/features.py`** — use selective NaN drop (not blanket >50%):
 
 ```python
 import numpy as np
@@ -369,7 +382,7 @@ def transform(df, state, config):
     return df.fillna(-1)
 ```
 
-**`model_mydataset.py`**:
+**`datasets/my_dataset/model.py`**:
 
 ```python
 import xgboost as xgb
@@ -392,7 +405,7 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_oot, y_oot, config):
     }
 ```
 
-### 4. Create a journal (`journal_mydataset.md`)
+### 4. Create a journal (`journals/my-dataset.md`)
 
 ```markdown
 # Journal: my-dataset

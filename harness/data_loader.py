@@ -33,8 +33,8 @@ def _load_local(config: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 # --- BigQuery loading ---
 
 def _read_sql_template() -> str:
-    """Read the features.sql template."""
-    sql_path = ROOT_DIR / "features.sql"
+    """Read the features.sql template (used only by the dormant BigQuery path)."""
+    sql_path = ROOT_DIR / "scripts" / "features.sql"
     return sql_path.read_text()
 
 
@@ -89,7 +89,7 @@ def _load_bigquery(config: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
     dates = config["dates"]
     label_col = config["fraud_type"]["label_column"]
     sql_template = _read_sql_template()
-    sql_hash = file_hash(ROOT_DIR / "features.sql")
+    sql_hash = file_hash(ROOT_DIR / "scripts" / "features.sql")
     segment_name = config["segment"]["name"]
 
     splits = {}

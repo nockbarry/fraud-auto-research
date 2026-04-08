@@ -1,7 +1,7 @@
 # IEEE-CIS Fraud Detection — Vesta CNP transactions, derived features stripped
 dataset_name: "ieee-cis-fresh"
-features_file: "features_ieee_fresh.py"
-model_file: "model_ieee_fresh.py"
+features_file: "datasets/ieee_cis_fresh/features.py"
+model_file: "datasets/ieee_cis_fresh/model.py"
 dataset_description: "Vesta CNP fraud, 590K txns — Track B fresh start (parallel to ieee-cis Track A)"
 
 local_data:
